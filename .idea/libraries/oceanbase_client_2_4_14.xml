@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="oceanbase-client-2.4.14">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/lib/oceanbase-client-2.4.14.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
