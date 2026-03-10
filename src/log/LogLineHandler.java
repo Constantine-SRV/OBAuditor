@@ -1,35 +1,44 @@
 package log;
 
+import db.SessionDao;
 import model.LoginEvent;
+
+import java.sql.Connection;
+import java.sql.SQLException;
 
 /**
  * Обработчик строки лога.
  * Диспетчеризует в правильный парсер по типу файла (SERVER / PROXY).
- * Сейчас — печатает найденные события.
- * Следующий шаг: запись в таблицу loginevents.
+ * LOGIN_OK и LOGIN_FAIL записываются в таблицу sessions через SessionDao.
  */
 public class LogLineHandler {
 
-    private final String fileType; // "SERVER" или "PROXY"
+    private final String fileType;
     private final String fileName;
+    private final String serverIp;   // IP узла из первой строки файла
+    private final SessionDao sessionDao;
 
-    private final ObServerLineParser serverParser;
-    private final ObProxyLineParser  proxyParser;
+    private final ObProxyLineParser proxyParser;
 
     private long processedCount = 0;
     private long skippedCount   = 0;
     private long eventCount     = 0;
-
-    public LogLineHandler(String fileType, String fileName) {
-        this.fileType    = fileType;
-        this.fileName    = fileName;
-        this.serverParser = new ObServerLineParser();
-        this.proxyParser  = new ObProxyLineParser();
-    }
+    private long insertedCount  = 0;
 
     /**
-     * Принять строку лога на обработку.
+     * @param fileType   "SERVER" или "PROXY"
+     * @param fileName   имя файла (для логов)
+     * @param serverIp   IP узла, извлечённый из первой строки файла
+     * @param conn       соединение с admintools (может быть null — тогда только вывод в консоль)
      */
+    public LogLineHandler(String fileType, String fileName, String serverIp, Connection conn) {
+        this.fileType   = fileType;
+        this.fileName   = fileName;
+        this.serverIp   = serverIp != null ? serverIp : "";
+        this.sessionDao = conn != null ? new SessionDao(conn) : null;
+        this.proxyParser = new ObProxyLineParser();
+    }
+
     public void handle(LogLine line) {
         processedCount++;
 
@@ -41,16 +50,27 @@ public class LogLineHandler {
             event = proxyParser.parse(line.raw);
         }
 
-        if (event != null) {
-            eventCount++;
-            System.out.println("[EVENT] " + event);
+        if (event == null) return;
 
-            // TODO: записать event в loginevents таблицу
+        eventCount++;
+        System.out.println("[EVENT] " + event);
+
+        // Записываем только LOGIN_OK и LOGIN_FAIL
+        if (sessionDao != null &&
+                ("LOGIN_OK".equals(event.eventType) || "LOGIN_FAIL".equals(event.eventType))) {
+            try {
+                sessionDao.insertLogin(event, serverIp);
+                insertedCount++;
+            } catch (SQLException ex) {
+                System.err.printf("[LogLineHandler] Failed to insert session event: %s | %s%n",
+                        ex.getMessage(), event);
+            }
         }
     }
 
-    public void incrementSkipped()  { skippedCount++; }
-    public long getProcessedCount() { return processedCount; }
-    public long getSkippedCount()   { return skippedCount; }
-    public long getEventCount()     { return eventCount; }
+    public void incrementSkipped()   { skippedCount++; }
+    public long getProcessedCount()  { return processedCount; }
+    public long getSkippedCount()    { return skippedCount; }
+    public long getEventCount()      { return eventCount; }
+    public long getInsertedCount()   { return insertedCount; }
 }
