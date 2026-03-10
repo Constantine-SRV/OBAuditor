@@ -7,19 +7,6 @@ import java.util.regex.Pattern;
 
 /**
  * Парсер строк observer.log (SERVER).
- *
- * Обнаруживает два типа событий:
- *
- * 1. LOGIN (OK или FAIL):
- *    [2026-03-10 10:20:35.234835] INFO  [SERVER] process (obmp_connect.cpp:518) [tid][...][...][trace]
- *    [lt=4] MySQL LOGIN(direct_client_ip="...", client_ip=..., tenant_name=..., user_name=...,
- *    sessid=..., proxy_sessid=..., use_ssl=..., proc_ret=..., conn->client_type_=...)
- *
- * 2. LOGOFF:
- *    [...] INFO  [RPC.OBMYSQL] destroy (obsm_conn_callback.cpp:244) [tid][...][T0][Y0-...]
- *    [lt=4] connection close(sessid=..., proxy_sessid=..., tenant_id=..., from_proxy=...)
- *
- * Статический класс — не хранит состояния.
  */
 public class ObServerLineParser {
 
@@ -53,10 +40,6 @@ public class ObServerLineParser {
             "\\btenant_id=(\\d+)");
 
     // ─────────────────────────────────────────────────────────────────
-    /**
-     * Попытаться разобрать строку лога.
-     * Возвращает LoginEvent или null если строка не интересна.
-     */
     public static LoginEvent parse(String line) {
         if (line.contains("MySQL LOGIN")) {
             return parseLogin(line);
@@ -69,7 +52,6 @@ public class ObServerLineParser {
 
     // ─────────────────────────────────────────────────────────────────
     private static LoginEvent parseLogin(String line) {
-        // Пропускаем служебные коннекты: 127.0.0.1 + root, ocp_monitor, proxy_ro
         String userName = extractStr(P_USER, line);
         String clientIp = extractClientIp(line);
         if ("ocp_monitor".equals(userName) || "proxy_ro".equals(userName)) return null;
@@ -83,10 +65,10 @@ public class ObServerLineParser {
         e.userName   = userName;
 
         String sessidStr = extractStr(P_SESSID, line);
-        if (sessidStr != null) e.sessionId = Long.parseLong(sessidStr);
+        if (sessidStr != null) e.sessionId = parseUnsignedLong(sessidStr);
 
         String proxySessidStr = extractStr(P_PROXY_SESSID, line);
-        if (proxySessidStr != null) e.proxySessid = Long.parseLong(proxySessidStr);
+        if (proxySessidStr != null) e.proxySessid = parseUnsignedLong(proxySessidStr);
 
         String sslVal = extractStr(P_SSL, line);
         e.ssl = "true".equals(sslVal) ? "Y" : "N";
@@ -113,15 +95,13 @@ public class ObServerLineParser {
         e.eventTime = extractStr(P_TIMESTAMP, line);
 
         String sessidStr = extractStr(P_SESSID, line);
-        if (sessidStr != null) e.sessionId = Long.parseLong(sessidStr);
+        if (sessidStr != null) e.sessionId = parseUnsignedLong(sessidStr);
 
         String proxySessidStr = extractStr(P_PROXY_SESSID, line);
-        if (proxySessidStr != null) e.proxySessid = Long.parseLong(proxySessidStr);
+        if (proxySessidStr != null) e.proxySessid = parseUnsignedLong(proxySessidStr);
 
-        // tenant_id (число) — в connection close нет tenant_name
-        // сохраняем как строку в tenantName для последующего сопоставления
         String tenantId = extractStr(P_TENANT_ID, line);
-        e.tenantName = tenantId; // "1002" и т.п.
+        e.tenantName = tenantId;
 
         return e;
     }
@@ -132,7 +112,6 @@ public class ObServerLineParser {
     private static String extractStr(Pattern p, String line) {
         Matcher m = p.matcher(line);
         if (!m.find()) return null;
-        // Берём первую непустую группу
         for (int i = 1; i <= m.groupCount(); i++) {
             String g = m.group(i);
             if (g != null && !g.isEmpty()) return g.trim();
@@ -140,7 +119,6 @@ public class ObServerLineParser {
         return null;
     }
 
-    /** client_ip может быть в кавычках "192.168.55.11" или без */
     private static String extractClientIp(String line) {
         Matcher m = P_CLIENT_IP.matcher(line);
         if (!m.find()) return null;
@@ -148,6 +126,19 @@ public class ObServerLineParser {
         String g2 = m.group(2);
         String ip = (g1 != null) ? g1 : g2;
         return ip != null ? ip.trim() : null;
+    }
+
+    /**
+     * Парсит sessid как беззнаковый uint64 (OceanBase использует uint64).
+     * Значения > Long.MAX_VALUE хранятся как отрицательный signed long,
+     * побитово корректны. Для вывода используй Long.toUnsignedString().
+     */
+    private static Long parseUnsignedLong(String s) {
+        try {
+            return Long.parseUnsignedLong(s);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static String resolveClientType(String ctype) {
