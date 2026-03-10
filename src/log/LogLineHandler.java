@@ -9,36 +9,30 @@ import java.sql.SQLException;
 /**
  * Обработчик строки лога.
  * Диспетчеризует в правильный парсер по типу файла (SERVER / PROXY).
- * LOGIN_OK и LOGIN_FAIL записываются в таблицу sessions через SessionDao.
+ * Найденные LOGIN-события записывает в таблицу sessions через SessionDao.
  */
 public class LogLineHandler {
 
-    private final String fileType;
-    private final String fileName;
-    private final String serverIp;   // IP узла из первой строки файла
+    private final String     fileType;   // "SERVER" или "PROXY"
+    private final String     fileName;
+    private final String     serverIp;   // IP узла из первой строки файла
     private final SessionDao sessionDao;
-
-    private final ObProxyLineParser proxyParser;
 
     private long processedCount = 0;
     private long skippedCount   = 0;
     private long eventCount     = 0;
     private long insertedCount  = 0;
 
-    /**
-     * @param fileType   "SERVER" или "PROXY"
-     * @param fileName   имя файла (для логов)
-     * @param serverIp   IP узла, извлечённый из первой строки файла
-     * @param conn       соединение с admintools (может быть null — тогда только вывод в консоль)
-     */
     public LogLineHandler(String fileType, String fileName, String serverIp, Connection conn) {
         this.fileType   = fileType;
         this.fileName   = fileName;
         this.serverIp   = serverIp != null ? serverIp : "";
-        this.sessionDao = conn != null ? new SessionDao(conn) : null;
-        this.proxyParser = new ObProxyLineParser();
+        this.sessionDao = new SessionDao(conn);
     }
 
+    /**
+     * Принять строку лога на обработку.
+     */
     public void handle(LogLine line) {
         processedCount++;
 
@@ -55,22 +49,24 @@ public class LogLineHandler {
         eventCount++;
         System.out.println("[EVENT] " + event);
 
-        // Записываем только LOGIN_OK и LOGIN_FAIL
-        if (sessionDao != null &&
-                ("LOGIN_OK".equals(event.eventType) || "LOGIN_FAIL".equals(event.eventType))) {
+        if ("LOGIN_OK".equals(event.eventType) || "LOGIN_FAIL".equals(event.eventType)) {
             try {
                 sessionDao.insertLogin(event, serverIp);
                 insertedCount++;
             } catch (SQLException ex) {
-                System.err.printf("[LogLineHandler] Failed to insert session event: %s | %s%n",
-                        ex.getMessage(), event);
+                System.err.printf("[LogLineHandler] insertLogin failed for %s: %s%n",
+                        event.eventType, ex.getMessage());
             }
         }
+        // LOGOFF — будет обрабатываться на следующем шаге (UPDATE sessions SET logoff_time=...)
     }
 
-    public void incrementSkipped()   { skippedCount++; }
-    public long getProcessedCount()  { return processedCount; }
-    public long getSkippedCount()    { return skippedCount; }
-    public long getEventCount()      { return eventCount; }
-    public long getInsertedCount()   { return insertedCount; }
+    public void incrementSkipped()  { skippedCount++; }
+    public long getProcessedCount() { return processedCount; }
+    public long getSkippedCount()   { return skippedCount; }
+    public long getEventCount()     { return eventCount; }
+    public long getInsertedCount()  { return insertedCount; }
+
+    // Proxy-парсер stateful — один экземпляр на файл
+    private final ObProxyLineParser proxyParser = new ObProxyLineParser();
 }

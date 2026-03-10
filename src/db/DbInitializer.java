@@ -6,6 +6,10 @@ import java.sql.*;
 
 /**
  * Инициализация базы данных при старте приложения.
+ *
+ * Порядок:
+ *   1. Подключаемся к системному тенанту → создаём базу admintools если нет
+ *   2. Подключаемся к admintools → создаём таблицы если нет
  */
 public class DbInitializer {
 
@@ -17,6 +21,7 @@ public class DbInitializer {
         this.config = config;
     }
 
+    // ─────────────────────────────────────────────────────────────────
     public void initialize() throws SQLException {
         System.out.println("[DbInitializer] Starting DB initialization...");
 
@@ -79,83 +84,72 @@ public class DbInitializer {
     // ─────────────────────────────────────────────────────────────────
 
     /**
-     * sessions — одна строка на одну сессию (логин + логофф).
+     * sessions — одна строка на сессию (логин + логофф).
      *
-     * Ключевые решения:
+     * server_ip      — IP узла-источника лога для UNIQUE KEY (NOT NULL).
+     *                  SERVER: из первой строки файла
+     *                  PROXY:  IP прокси-хоста (из первой строки файла, пока "")
      *
-     * AUTO_INCREMENT id как PRIMARY KEY (8 байт) вместо составного:
-     *   составной PK включается в каждый вторичный индекс — дорого по месту.
+     * server_node_ip — IP конкретного OBServer-узла:
+     *                  SERVER: совпадает с server_ip
+     *                  PROXY:  извлекается из server_ip={192.168.55.205:2881} в строке лога
      *
-     * server_ip — IP сервера из пути к лог-файлу (\\192.168.55.205\oceanbase_log).
-     *   Для SERVER заполняем IP сервера, для PROXY — IP прокси.
-     *   Позволяет различать события с разных узлов кластера.
+     * from_proxy     — коннект пришёл через OBProxy (from_proxy= в логе SERVER)
      *
-     * cluster_name — имя кластера из PROXY-лога (например "obc1").
-     *   Для SERVER пишем '' (пустую строку, не NULL) — NULL в составном
-     *   UNIQUE KEY не даёт защиты от дублей в MySQL/OceanBase (NULL != NULL).
-     *
-     * UNIQUE KEY uk_sess (source, server_ip, cluster_name, session_id, login_time):
-     *   Обеспечивает идемпотентность при перечитывании файлов после ротации.
-     *   При повторной вставке используем INSERT IGNORE.
-     *
-     * is_success: 1 = LOGIN_OK, 0 = LOGIN_FAIL.
-     *
-     * logoff_time: NULL пока сессия открыта.
-     *   UPDATE по (source, server_ip, session_id) WHERE logoff_time IS NULL.
+     * `ssl`          — зарезервированное слово, в backtick-ах
      */
     private TableDef createSessionsTableSql() {
-        String ddl = """
-                CREATE TABLE `sessions` (
-                  `id`            BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT,
-                  `source`        VARCHAR(8)       NOT NULL COMMENT 'SERVER или PROXY',
-                  `server_ip`     VARCHAR(64)      NOT NULL DEFAULT '' COMMENT 'IP узла из пути к лог-файлу',
-                  `cluster_name`  VARCHAR(128)     NOT NULL DEFAULT '' COMMENT 'Имя кластера (PROXY) или пустая строка (SERVER)',
-                  `session_id`    BIGINT UNSIGNED  NOT NULL COMMENT 'sessid (SERVER) или server_sessid (PROXY)',
-                  `login_time`    DATETIME(6)      NOT NULL COMMENT 'Время логина из лога',
-                  `logoff_time`   DATETIME(6)          NULL COMMENT 'Время логоффа, NULL = сессия ещё открыта',
-                  `is_success`    TINYINT(1)       NOT NULL COMMENT '1=LOGIN_OK 0=LOGIN_FAIL',
-                  `client_ip`     VARCHAR(64)          NULL COMMENT 'IP клиента',
-                  `tenant_name`   VARCHAR(128)         NULL,
-                  `user_name`     VARCHAR(128)         NULL,
-                  `error_code`    INT                  NULL COMMENT 'Код ошибки при FAIL, например 1045',
-                  `ssl`           CHAR(1)              NULL COMMENT 'Y/N только для SERVER',
-                  `client_type`   VARCHAR(16)          NULL COMMENT 'MYSQL_CLI/JDBC/OBCLIENT только для SERVER',
-                  `proxy_sessid`  BIGINT UNSIGNED      NULL COMMENT 'proxy_sessid',
-                  `cs_id`         BIGINT UNSIGNED      NULL COMMENT 'client session id только для PROXY',
-                  PRIMARY KEY (`id`),
-                  UNIQUE KEY `uk_sess` (`source`, `server_ip`, `cluster_name`, `session_id`, `login_time`),
-                  KEY `idx_login_time`  (`login_time`),
-                  KEY `idx_user`        (`user_name`),
-                  KEY `idx_open`        (`logoff_time`)
-                ) COMMENT = 'OceanBase сессии: логин + логофф в одной строке'
-                """;
+        String ddl =
+            "CREATE TABLE `sessions` (" +
+            "  `id`             BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT," +
+            "  `source`         VARCHAR(8)       NOT NULL COMMENT 'SERVER или PROXY'," +
+            "  `server_ip`      VARCHAR(64)      NOT NULL DEFAULT '' COMMENT 'IP узла-источника лога (для UK)'," +
+            "  `cluster_name`   VARCHAR(128)     NOT NULL DEFAULT '' COMMENT 'Имя кластера (PROXY) или пустая строка'," +
+            "  `session_id`     BIGINT UNSIGNED  NOT NULL COMMENT 'sessid (SERVER) или server_sessid (PROXY)'," +
+            "  `login_time`     DATETIME(6)      NOT NULL COMMENT 'Время логина из лога'," +
+            "  `logoff_time`    DATETIME(6)          NULL COMMENT 'Время логоффа, NULL = сессия открыта'," +
+            "  `is_success`     TINYINT(1)       NOT NULL COMMENT '1=LOGIN_OK 0=LOGIN_FAIL'," +
+            "  `client_ip`      VARCHAR(64)          NULL COMMENT 'IP клиента'," +
+            "  `tenant_name`    VARCHAR(128)         NULL," +
+            "  `user_name`      VARCHAR(128)         NULL," +
+            "  `error_code`     INT                  NULL COMMENT 'Код ошибки при FAIL'," +
+            "  `ssl`            CHAR(1)              NULL COMMENT 'Y/N только для SERVER'," +
+            "  `client_type`    VARCHAR(16)          NULL COMMENT 'JDBC/JAVA/OCI/OBCLIENT/MYSQL_CLI'," +
+            "  `proxy_sessid`   BIGINT UNSIGNED      NULL COMMENT 'proxy_sessid'," +
+            "  `cs_id`          BIGINT UNSIGNED      NULL COMMENT 'Client session id (PROXY)'," +
+            "  `server_node_ip` VARCHAR(64)          NULL COMMENT 'IP OBServer-узла из тела строки лога'," +
+            "  `from_proxy`     TINYINT(1)           NULL COMMENT '1=пришёл через OBProxy (SERVER-лог)'," +
+            "  PRIMARY KEY (`id`)," +
+            "  UNIQUE KEY `uk_sess` (`source`, `server_ip`, `cluster_name`, `session_id`, `login_time`)," +
+            "  KEY `idx_login_time` (`login_time`)," +
+            "  KEY `idx_user`       (`user_name`)," +
+            "  KEY `idx_open`       (`logoff_time`)" +
+            ") COMMENT = 'OceanBase сессии: логин и логофф в одной строке'";
         return new TableDef("sessions", ddl);
     }
 
     /**
      * logfiles — состояние обработки каждого лог-файла.
+     * last_line_num хранит байтовый offset (не номер строки).
      *
-     * last_line_num — байтовый offset в файле (не номер строки).
-     *   При следующем запуске делаем FileChannel.position(offset) и
-     *   читаем только новые данные без перебора с начала.
+     * uq_dir_name: prefix(255) на file_dir чтобы не превышать лимит ключа.
      */
     private TableDef createLogFilesTableSql() {
-        String ddl = """
-                CREATE TABLE `logfiles` (
-                  `id`              BIGINT       NOT NULL AUTO_INCREMENT,
-                  `file_dir`        VARCHAR(512) NOT NULL COMMENT 'Директория лог-файла',
-                  `file_name`       VARCHAR(256) NOT NULL COMMENT 'Имя файла',
-                  `file_type`       VARCHAR(16)  NOT NULL COMMENT 'SERVER или PROXY',
-                  `file_size`       BIGINT       NOT NULL DEFAULT 0 COMMENT 'Последний известный размер в байтах',
-                  `last_line_num`   BIGINT       NOT NULL DEFAULT 0 COMMENT 'Байтовый offset после последней обработанной строки',
-                  `last_timestamp`  VARCHAR(32)      NULL COMMENT 'Временная метка последней обработанной записи',
-                  `last_tid`        INT              NULL COMMENT 'Thread ID последней обработанной записи',
-                  `last_trace_id`   VARCHAR(64)      NULL COMMENT 'Trace ID последней обработанной записи',
-                  PRIMARY KEY (`id`),
-                  UNIQUE KEY `uq_dir_name` (`file_dir`(255), `file_name`),
-                  KEY `idx_file_type` (`file_type`)
-                ) COMMENT = 'Состояние обработки лог-файлов OceanBase'
-                """;
+        String ddl =
+            "CREATE TABLE `logfiles` (" +
+            "  `id`             BIGINT       NOT NULL AUTO_INCREMENT," +
+            "  `file_dir`       VARCHAR(512) NOT NULL COMMENT 'Директория лог-файла'," +
+            "  `file_name`      VARCHAR(256) NOT NULL COMMENT 'Имя файла'," +
+            "  `file_type`      VARCHAR(16)  NOT NULL COMMENT 'SERVER или PROXY'," +
+            "  `file_size`      BIGINT       NOT NULL DEFAULT 0 COMMENT 'Последний известный размер в байтах'," +
+            "  `last_line_num`  BIGINT       NOT NULL DEFAULT 0 COMMENT 'Байтовый offset после последней обработанной строки'," +
+            "  `last_timestamp` VARCHAR(32)      NULL COMMENT 'Временная метка последней обработанной записи'," +
+            "  `last_tid`       INT              NULL COMMENT 'Thread ID последней обработанной записи'," +
+            "  `last_trace_id`  VARCHAR(64)      NULL COMMENT 'Trace ID последней обработанной записи'," +
+            "  PRIMARY KEY (`id`)," +
+            "  UNIQUE KEY `uq_dir_name` (`file_dir`(255), `file_name`)," +
+            "  KEY `idx_file_type` (`file_type`)" +
+            ") COMMENT = 'Состояние обработки лог-файлов OceanBase'";
         return new TableDef("logfiles", ddl);
     }
 
@@ -176,9 +170,6 @@ public class DbInitializer {
     private static class TableDef {
         final String name;
         final String ddl;
-        TableDef(String name, String ddl) {
-            this.name = name;
-            this.ddl  = ddl;
-        }
+        TableDef(String name, String ddl) { this.name = name; this.ddl = ddl; }
     }
 }

@@ -6,12 +6,18 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Парсер строк observer.log (SERVER).
+ * Парсер строк observer.log (SERVER). Статический класс — не хранит состояния.
+ *
+ * 1. LOGIN (OK или FAIL):
+ *    MySQL LOGIN(direct_client_ip="...", client_ip=..., tenant_name=..., user_name=...,
+ *    sessid=..., proxy_sessid=..., use_ssl=..., proc_ret=...,
+ *    from_proxy=..., from_java_client=..., from_jdbc_client=..., from_oci_client=...,
+ *    conn->client_type_=...)
+ *
+ * 2. LOGOFF:
+ *    connection close(sessid=..., proxy_sessid=..., tenant_id=..., from_proxy=...)
  */
 public class ObServerLineParser {
-
-    // ─── LOGIN ───────────────────────────────────────────────────────
-    private static final Pattern P_LOGIN = Pattern.compile("MySQL LOGIN\\(");
 
     private static final Pattern P_TIMESTAMP = Pattern.compile(
             "^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d+)\\]");
@@ -30,23 +36,22 @@ public class ObServerLineParser {
             "\\buse_ssl=(true|false)");
     private static final Pattern P_PROC_RET = Pattern.compile(
             "\\bproc_ret=(-?\\d+)");
-    private static final Pattern P_CLIENT_TYPE = Pattern.compile(
-            "\\bconn->client_type_=(\\d+)");
 
-    // ─── LOGOFF ──────────────────────────────────────────────────────
-    private static final Pattern P_LOGOFF = Pattern.compile("connection close\\(");
+    // Тип клиента — флаги from_*_client приоритетнее conn->client_type_
+    private static final Pattern P_FROM_JAVA   = Pattern.compile("\\bfrom_java_client=(true|false)");
+    private static final Pattern P_FROM_JDBC   = Pattern.compile("\\bfrom_jdbc_client=(true|false)");
+    private static final Pattern P_FROM_OCI    = Pattern.compile("\\bfrom_oci_client=(true|false)");
+    private static final Pattern P_CLIENT_TYPE = Pattern.compile("\\bconn->client_type_=(\\d+)");
 
-    private static final Pattern P_TENANT_ID = Pattern.compile(
-            "\\btenant_id=(\\d+)");
+    // from_proxy — присутствует и в LOGIN и в LOGOFF строках
+    private static final Pattern P_FROM_PROXY = Pattern.compile("\\bfrom_proxy=(true|false)");
+
+    private static final Pattern P_TENANT_ID = Pattern.compile("\\btenant_id=(\\d+)");
 
     // ─────────────────────────────────────────────────────────────────
     public static LoginEvent parse(String line) {
-        if (line.contains("MySQL LOGIN")) {
-            return parseLogin(line);
-        }
-        if (line.contains("connection close")) {
-            return parseLogoff(line);
-        }
+        if (line.contains("MySQL LOGIN"))      return parseLogin(line);
+        if (line.contains("connection close")) return parseLogoff(line);
         return null;
     }
 
@@ -54,6 +59,8 @@ public class ObServerLineParser {
     private static LoginEvent parseLogin(String line) {
         String userName = extractStr(P_USER, line);
         String clientIp = extractClientIp(line);
+
+        // Фильтруем служебные коннекты
         if ("ocp_monitor".equals(userName) || "proxy_ro".equals(userName)) return null;
         if ("127.0.0.1".equals(clientIp) && "root".equals(userName))       return null;
 
@@ -77,12 +84,16 @@ public class ObServerLineParser {
         if ("0".equals(procRet)) {
             e.eventType = "LOGIN_OK";
         } else {
-            e.eventType  = "LOGIN_FAIL";
-            e.errorCode  = procRet != null ? Integer.parseInt(procRet) : null;
+            e.eventType = "LOGIN_FAIL";
+            e.errorCode = procRet != null ? Integer.parseInt(procRet) : null;
         }
 
-        String ctypeStr = extractStr(P_CLIENT_TYPE, line);
-        e.clientType = resolveClientType(ctypeStr);
+        String fromProxyVal = extractStr(P_FROM_PROXY, line);
+        if (fromProxyVal != null) e.fromProxy = "true".equals(fromProxyVal);
+
+        // Тип клиента: флаги from_*_client приоритетнее client_type_
+        // Пример: client_type_=1 (OBCLIENT) но from_jdbc_client=true → JDBC
+        e.clientType = resolveClientType(line);
 
         return e;
     }
@@ -100,8 +111,11 @@ public class ObServerLineParser {
         String proxySessidStr = extractStr(P_PROXY_SESSID, line);
         if (proxySessidStr != null) e.proxySessid = parseUnsignedLong(proxySessidStr);
 
-        String tenantId = extractStr(P_TENANT_ID, line);
-        e.tenantName = tenantId;
+        // connection close содержит tenant_id (число), не tenant_name
+        e.tenantName = extractStr(P_TENANT_ID, line);
+
+        String fromProxyVal = extractStr(P_FROM_PROXY, line);
+        if (fromProxyVal != null) e.fromProxy = "true".equals(fromProxyVal);
 
         return e;
     }
@@ -109,6 +123,22 @@ public class ObServerLineParser {
     // ─────────────────────────────────────────────────────────────────
     //  Helpers
     // ─────────────────────────────────────────────────────────────────
+
+    private static String resolveClientType(String line) {
+        if ("true".equals(extractStr(P_FROM_JDBC, line))) return "JDBC";
+        if ("true".equals(extractStr(P_FROM_JAVA, line))) return "JAVA";
+        if ("true".equals(extractStr(P_FROM_OCI,  line))) return "OCI";
+        // Запасной вариант
+        String ctype = extractStr(P_CLIENT_TYPE, line);
+        if (ctype == null) return null;
+        switch (ctype) {
+            case "1": return "OBCLIENT";
+            case "2": return "JDBC";
+            case "3": return "MYSQL_CLI";
+            default:  return "TYPE_" + ctype;
+        }
+    }
+
     private static String extractStr(Pattern p, String line) {
         Matcher m = p.matcher(line);
         if (!m.find()) return null;
@@ -128,26 +158,8 @@ public class ObServerLineParser {
         return ip != null ? ip.trim() : null;
     }
 
-    /**
-     * Парсит sessid как беззнаковый uint64 (OceanBase использует uint64).
-     * Значения > Long.MAX_VALUE хранятся как отрицательный signed long,
-     * побитово корректны. Для вывода используй Long.toUnsignedString().
-     */
     private static Long parseUnsignedLong(String s) {
-        try {
-            return Long.parseUnsignedLong(s);
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    private static String resolveClientType(String ctype) {
-        if (ctype == null) return null;
-        switch (ctype) {
-            case "1": return "OBCLIENT";
-            case "2": return "JDBC";
-            case "3": return "MYSQL_CLI";
-            default:  return "TYPE_" + ctype;
-        }
+        try { return Long.parseUnsignedLong(s); }
+        catch (NumberFormatException e) { return null; }
     }
 }
