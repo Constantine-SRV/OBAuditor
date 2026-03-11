@@ -3,19 +3,32 @@ package model;
 /**
  * POJO — строка таблицы logfiles.
  * Хранит состояние обработки одного лог-файла.
+ *
+ * collectorId — идентификатор сервиса который читает этот файл.
+ *               Входит в UNIQUE KEY вместе с file_dir и file_name.
+ *               Позволяет нескольким сервисам читать файлы с одинаковыми
+ *               локальными путями без коллизий.
+ *
+ * fileIp      — IP узла которому принадлежит файл:
+ *               SERVER: из первой строки файла (address: "IP:port")
+ *               PROXY:  из строки "server session born" (local_ip:{IP:port})
+ *               Используется как server_ip в таблице sessions (UNIQUE KEY).
+ *
+ * lastLineNum — байтовый OFFSET (не номер строки).
  */
 public class LogFileRecord {
-    public long   id;            // 0 = новая запись, не сохранена в БД
-    public String fileDir;
-    public String fileName;
-    public String fileType;      // "SERVER" или "PROXY"
-    public long   fileSize;      // последний известный размер
-    public long   lastLineNum;   // номер последней обработанной строки (0 = не читали)
-    public String lastTimestamp; // "2026-03-10 10:20:29.213321"
+    public long    id;
+    public String  collectorId;   // идентификатор сервиса-коллектора
+    public String  fileDir;
+    public String  fileName;
+    public String  fileType;      // "SERVER" или "PROXY"
+    public long    fileSize;
+    public long    lastLineNum;   // байтовый offset
+    public String  lastTimestamp;
     public Integer lastTid;
-    public String lastTraceId;
+    public String  lastTraceId;
+    public String  fileIp;        // IP узла из лога
 
-    /** Полный путь для File-операций */
     public String fullPath() {
         return fileDir.endsWith("\\") || fileDir.endsWith("/")
                 ? fileDir + fileName
@@ -24,7 +37,8 @@ public class LogFileRecord {
 
     @Override
     public String toString() {
-        return String.format("LogFileRecord{dir='%s', name='%s', type=%s, size=%d, lastLine=%d, lastTs='%s'}",
-                fileDir, fileName, fileType, fileSize, lastLineNum, lastTimestamp);
+        return String.format(
+                "LogFileRecord{collector='%s', dir='%s', name='%s', type=%s, size=%d, offset=%d, ip='%s', lastTs='%s'}",
+                collectorId, fileDir, fileName, fileType, fileSize, lastLineNum, fileIp, lastTimestamp);
     }
 }

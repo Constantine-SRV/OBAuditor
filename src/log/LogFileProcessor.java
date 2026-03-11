@@ -17,23 +17,26 @@ import java.util.regex.Pattern;
 /**
  * Обрабатывает лог-файлы OceanBase из заданных директорий.
  *
- * Особенности:
- *   - last_line_num в таблице logfiles хранит байтовый OFFSET, не номер строки.
- *     При чтении используется FileChannel.position(offset) — эффективно для
- *     больших файлов на сетевых шарах.
- *   - server_ip извлекается из первой строки файла (не из пути).
- *     SERVER: "New syslog file info: [address: "192.168.55.205:2882", ...]"
- *     PROXY:  первая строка формата пока неизвестна — возвращает ""
+ * collectorId — уникальный идентификатор этого экземпляра сервиса.
+ *               Хранится в logfiles.collector_id, входит в UNIQUE KEY.
+ *               Позволяет нескольким сервисам читать файлы с одинаковыми
+ *               локальными путями без коллизий.
  *
- * Детектирование ротации (только для активного файла):
- *   - Текущий размер файла < last_size → файл заменён (ротация)
- *   - ИЛИ last_timestamp старше 10 минут → сервис не работал → читаем заново
+ * IP узла (fileIp / server_ip):
+ *   SERVER: из первой строки файла: address: "192.168.55.205:2882"
+ *   PROXY:  из строк "server session born": local_ip:{192.168.55.200:37288}
+ *           — сканируется до первого нахождения, затем берётся из БД.
+ *
+ * last_line_num хранит байтовый OFFSET — FileChannel.position(offset) пропускает
+ * уже прочитанное без построчного перебора.
  */
 public class LogFileProcessor {
 
-    // Первая строка SERVER-лога: address: "192.168.55.205:2882"
-    private static final Pattern P_FIRST_LINE_IP = Pattern.compile(
+    private static final Pattern P_SERVER_FIRST_LINE_IP = Pattern.compile(
             "address:\\s*\"(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}):\\d+\"");
+
+    private static final Pattern P_PROXY_LOCAL_IP = Pattern.compile(
+            "\\blocal_ip:\\{(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}):\\d+\\}");
 
     private static final Pattern LINE_HEADER = Pattern.compile(
             "^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{6})\\]" +
@@ -51,12 +54,14 @@ public class LogFileProcessor {
 
     private static final long STALE_MINUTES = 10;
 
-    private final Connection conn;
-    private final LogFileDao dao;
+    private final Connection  conn;
+    private final LogFileDao  dao;
+    private final String      collectorId;
 
-    public LogFileProcessor(Connection conn) {
-        this.conn = conn;
-        this.dao  = new LogFileDao(conn);
+    public LogFileProcessor(Connection conn, String collectorId) {
+        this.conn        = conn;
+        this.dao         = new LogFileDao(conn);
+        this.collectorId = collectorId;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -78,9 +83,10 @@ public class LogFileProcessor {
             System.err.println("[LogFileProcessor] Directory not found: " + dirPath);
             return;
         }
-        System.out.println("[LogFileProcessor] Processing dir: " + dirPath + " type=" + fileType);
+        System.out.println("[LogFileProcessor] Processing dir: " + dirPath
+                + " type=" + fileType + " collector=" + collectorId);
 
-        Map<String, LogFileRecord> knownFiles = dao.loadByDir(dirPath);
+        Map<String, LogFileRecord> knownFiles = dao.loadByDir(collectorId, dirPath);
 
         File[] files = dir.listFiles(f -> {
             if (!f.isFile()) return false;
@@ -94,12 +100,11 @@ public class LogFileProcessor {
             return;
         }
 
-        // Ротированные файлы сначала, активный — последним
         Arrays.sort(files, (a, b) -> {
             boolean aActive = isActiveLog(a.getName(), namePrefixes[0]);
             boolean bActive = isActiveLog(b.getName(), namePrefixes[0]);
-            if (aActive && !bActive) return  1;
-            if (!aActive && bActive) return -1;
+            if (aActive && !bActive)  return  1;
+            if (!aActive && bActive)  return -1;
             return a.getName().compareTo(b.getName());
         });
 
@@ -110,22 +115,25 @@ public class LogFileProcessor {
     // ─────────────────────────────────────────────────────────────────
     private void processFile(File file, String dirPath, String fileType,
                              Map<String, LogFileRecord> knownFiles) throws Exception {
-        String fileName  = file.getName();
-        boolean isActive = isActiveLog(fileName, fileType.equals("SERVER") ? "observer.log" : "obproxy.log");
-        long currentSize = file.length();
+        String  fileName  = file.getName();
+        boolean isActive  = isActiveLog(fileName,
+                fileType.equals("SERVER") ? "observer.log" : "obproxy.log");
+        long currentSize  = file.length();
 
         LogFileRecord record = knownFiles.get(fileName);
         boolean isNew = (record == null);
         if (isNew) {
             record = new LogFileRecord();
-            record.fileDir    = dirPath;
-            record.fileName   = fileName;
-            record.fileType   = fileType;
-            record.fileSize   = 0;
-            record.lastLineNum = 0; // используем как байтовый offset
+            record.collectorId = collectorId;
+            record.fileDir     = dirPath;
+            record.fileName    = fileName;
+            record.fileType    = fileType;
+            record.fileSize    = 0;
+            record.lastLineNum = 0;
+            record.fileIp      = null;
         }
 
-        long startOffset = record.lastLineNum; // байтовый offset
+        long startOffset = record.lastLineNum;
 
         if (isActive && !isNew && shouldResetToStart(record, currentSize)) {
             System.out.printf("[LogFileProcessor] Rotation detected for %s — reading from start%n", fileName);
@@ -134,67 +142,55 @@ public class LogFileProcessor {
             record.lastTimestamp = null;
             record.lastTid       = null;
             record.lastTraceId   = null;
+            // fileIp не сбрасываем — хост не меняется при ротации
         }
 
-        // Нет новых данных
         if (!isNew && currentSize == record.fileSize && startOffset >= currentSize) {
-            System.out.printf("[LogFileProcessor] %s — no changes (size=%d), skipping%n", fileName, currentSize);
+            System.out.printf("[LogFileProcessor] %s — no changes (size=%d), skipping%n",
+                    fileName, currentSize);
             return;
         }
 
         System.out.printf("[LogFileProcessor] Processing %s (size=%d, offset=%d)%n",
                 fileName, currentSize, startOffset);
 
-        // Читаем IP из первой строки файла (не зависит от смещения)
-        String serverIp = readServerIp(file);
-        System.out.printf("[LogFileProcessor] %s — server_ip=%s%n", fileName, serverIp);
+        // ── Определяем IP узла ───────────────────────────────────────
+        String serverIp = record.fileIp != null ? record.fileIp : "";
 
+        if (serverIp.isEmpty() && "SERVER".equals(fileType)) {
+            serverIp      = readServerIpFromFirstLine(file);
+            record.fileIp = serverIp;
+        }
+
+        System.out.printf("[LogFileProcessor] %s — file_ip=%s%n", fileName,
+                serverIp.isEmpty() ? "(searching in log...)" : serverIp);
+
+        // ── Читаем и обрабатываем ────────────────────────────────────
         LogLineHandler handler = new LogLineHandler(fileType, fileName, serverIp, conn);
-        readAndProcess(file, startOffset, record, handler);
+        readAndProcess(file, startOffset, record, handler, isNew);
 
         record.fileSize = currentSize;
         if (isNew) {
             dao.insert(record);
-            System.out.printf("[LogFileProcessor] %s — inserted new record id=%d%n", fileName, record.id);
+            System.out.printf("[LogFileProcessor] %s — inserted new record id=%d%n",
+                    fileName, record.id);
         } else {
             dao.update(record);
         }
 
-        System.out.printf("[LogFileProcessor] %s — done. processed=%d skipped=%d events=%d inserted=%d offset=%d%n",
+        System.out.printf(
+                "[LogFileProcessor] %s — done. processed=%d skipped=%d events=%d inserted=%d offset=%d ip=%s%n",
                 fileName, handler.getProcessedCount(), handler.getSkippedCount(),
-                handler.getEventCount(), handler.getInsertedCount(), record.lastLineNum);
+                handler.getEventCount(), handler.getInsertedCount(),
+                record.lastLineNum, record.fileIp);
     }
 
     // ─────────────────────────────────────────────────────────────────
-    /**
-     * Читает первую строку файла и извлекает IP узла.
-     * SERVER: ищет address: "IP:port"
-     * PROXY:  формат первой строки отличается — возвращает "" пока не установлено
-     */
-    private String readServerIp(File file) {
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
-            String firstLine = reader.readLine();
-            if (firstLine == null) return "";
-            Matcher m = P_FIRST_LINE_IP.matcher(firstLine);
-            if (m.find()) return m.group(1);
-        } catch (IOException e) {
-            System.err.println("[LogFileProcessor] Cannot read first line of " + file.getName() + ": " + e.getMessage());
-        }
-        return "";
-    }
-
-    // ─────────────────────────────────────────────────────────────────
-    /**
-     * Читает файл начиная с байтового offset.
-     * Использует FileChannel.position() для эффективного пропуска уже прочитанного.
-     */
     private void readAndProcess(File file, long startOffset, LogFileRecord record,
-                                LogLineHandler handler) throws IOException {
+                                LogLineHandler handler, boolean isNew) throws IOException {
         try (FileInputStream fis = new FileInputStream(file)) {
             FileChannel channel = fis.getChannel();
 
-            // Прыгаем сразу на нужный offset
             if (startOffset > 0 && startOffset <= channel.size()) {
                 channel.position(startOffset);
             }
@@ -202,37 +198,65 @@ public class LogFileProcessor {
             BufferedReader reader = new BufferedReader(
                     new InputStreamReader(fis, StandardCharsets.UTF_8));
 
+            boolean needProxyIp = "PROXY".equals(record.fileType)
+                    && (record.fileIp == null || record.fileIp.isEmpty());
+
             String raw;
             while ((raw = reader.readLine()) != null) {
-                LogLine line = parseLine(raw);
-                handler.handle(line);
+
+                if (needProxyIp && raw.contains("server session born")) {
+                    Matcher m = P_PROXY_LOCAL_IP.matcher(raw);
+                    if (m.find()) {
+                        record.fileIp = m.group(1);
+                        needProxyIp   = false;
+                        System.out.printf("[LogFileProcessor] %s — found proxy ip: %s%n",
+                                record.fileName, record.fileIp);
+                        if (!isNew && record.id > 0) {
+                            try { dao.updateFileIp(record); }
+                            catch (Exception e) {
+                                System.err.println("[LogFileProcessor] updateFileIp failed: " + e.getMessage());
+                            }
+                        }
+                        handler.setServerIp(record.fileIp);
+                    }
+                }
+
+                handler.handle(parseLine(raw));
             }
 
-            // Сохраняем текущую позицию как новый offset
             record.lastLineNum = channel.position();
-
-            // Обновляем последний timestamp из последней обработанной строки с позицией
-            // (делается в handler через record — для простоты берём из последней строки с ts)
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    private String readServerIpFromFirstLine(File file) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String firstLine = reader.readLine();
+            if (firstLine == null) return "";
+            Matcher m = P_SERVER_FIRST_LINE_IP.matcher(firstLine);
+            if (m.find()) return m.group(1);
+        } catch (IOException e) {
+            System.err.println("[LogFileProcessor] Cannot read first line of "
+                    + file.getName() + ": " + e.getMessage());
+        }
+        return "";
     }
 
     // ─────────────────────────────────────────────────────────────────
     private LogLine parseLine(String raw) {
         Matcher m = LINE_HEADER.matcher(raw);
-        if (m.find()) {
+        if (m.find())
             return new LogLine(0, raw, m.group(1), Integer.parseInt(m.group(2)), m.group(3));
-        }
         Matcher m2 = TIMESTAMP_ONLY.matcher(raw);
-        if (m2.find()) {
+        if (m2.find())
             return new LogLine(0, raw, m2.group(1), null, null);
-        }
         return new LogLine(0, raw, null, null, null);
     }
 
     // ─────────────────────────────────────────────────────────────────
     private boolean shouldResetToStart(LogFileRecord record, long currentSize) {
         if (currentSize < record.fileSize) return true;
-
         if (record.lastTimestamp != null) {
             try {
                 LocalDateTime lastTs = LocalDateTime.parse(record.lastTimestamp, LOG_TS_FMT);
@@ -243,7 +267,8 @@ public class LogFileProcessor {
                     return true;
                 }
             } catch (Exception e) {
-                System.err.println("[LogFileProcessor] Cannot parse lastTimestamp: " + record.lastTimestamp);
+                System.err.println("[LogFileProcessor] Cannot parse lastTimestamp: "
+                        + record.lastTimestamp);
             }
         }
         return false;

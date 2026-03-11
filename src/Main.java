@@ -43,13 +43,14 @@ public class Main {
 
         // 3. Печатаем конфиг
         System.out.println("\n--- Loaded configuration ---");
+        System.out.println("CollectorId        : " + config.collectorId);
         System.out.println("OBProxy log paths  : " + config.obProxyLogPaths);
         System.out.println("OBServer log paths : " + config.obServerLogPaths);
         System.out.println("DB connection      : " + config.systemTenantConnection);
         System.out.println("JDBC URL           : " + config.systemTenantConnection.toJdbcUrl());
         System.out.println("----------------------------\n");
 
-        // 4. Инициализация БД (подключаемся к oceanbase для создания admintools)
+        // 4. Инициализация БД
         try {
             DbInitializer initializer = new DbInitializer(config.systemTenantConnection);
             initializer.initialize();
@@ -60,7 +61,7 @@ public class Main {
             return;
         }
 
-        // 5. Обработка логов (подключаемся к admintools)
+        // 5. Обработка логов
         try {
             Connection conn = DriverManager.getConnection(
                     config.systemTenantConnection.toJdbcUrl("admintools"),
@@ -68,7 +69,7 @@ public class Main {
                     config.systemTenantConnection.password
             );
 
-            LogFileProcessor processor = new LogFileProcessor(conn);
+            LogFileProcessor processor = new LogFileProcessor(conn, config.collectorId);
             processor.processServerDirs(config.obServerLogPaths);
             processor.processProxyDirs(config.obProxyLogPaths);
 

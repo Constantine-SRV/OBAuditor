@@ -4,6 +4,7 @@ import org.w3c.dom.*;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.File;
+import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -31,14 +32,36 @@ public class AppConfigReader {
         doc.getDocumentElement().normalize();
 
         AppConfig cfg = new AppConfig();
-        cfg.obProxyLogPaths         = readStringList(doc, "ObProxyLogPaths",  "Path");
-        cfg.obServerLogPaths        = readStringList(doc, "ObServerLogPaths", "Path");
-        cfg.systemTenantConnection  = readConnectionConfig(doc, "SystemTenantConnection");
+
+        // CollectorId: из конфига или hostname
+        String collectorId = getText(doc.getDocumentElement(), "CollectorId");
+        if (collectorId == null || collectorId.isEmpty()) {
+            collectorId = resolveHostname();
+            System.out.println("[AppConfigReader] CollectorId not set in config, using hostname: " + collectorId);
+        } else {
+            System.out.println("[AppConfigReader] CollectorId: " + collectorId);
+        }
+        cfg.collectorId = collectorId;
+
+        cfg.obProxyLogPaths        = readStringList(doc, "ObProxyLogPaths",  "Path");
+        cfg.obServerLogPaths       = readStringList(doc, "ObServerLogPaths", "Path");
+        cfg.systemTenantConnection = readConnectionConfig(doc, "SystemTenantConnection");
         return cfg;
     }
 
     // ─────────────────────────────────────────────────────────────────
-    //  Читаем список строк внутри блока: <BlockTag><ItemTag>val</ItemTag>...</BlockTag>
+    /**
+     * Получить hostname машины. Если не удалось — возвращает "unknown".
+     */
+    private static String resolveHostname() {
+        try {
+            return InetAddress.getLocalHost().getHostName();
+        } catch (Exception e) {
+            System.err.println("[AppConfigReader] Cannot resolve hostname: " + e.getMessage());
+            return "unknown";
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────
     private static List<String> readStringList(Document doc, String blockTag, String itemTag) {
         List<String> result = new ArrayList<>();
@@ -55,8 +78,6 @@ public class AppConfigReader {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    //  Читаем блок подключения
-    // ─────────────────────────────────────────────────────────────────
     private static ConnectionConfig readConnectionConfig(Document doc, String blockTag) {
         ConnectionConfig cc = new ConnectionConfig();
         NodeList blocks = doc.getElementsByTagName(blockTag);
@@ -70,21 +91,13 @@ public class AppConfigReader {
         }
 
         Element el = (Element) blocks.item(0);
-
-        // Список хостов <Hosts><Host>ip:port</Host>...</Hosts>
-        cc.hosts = readStringList(el, "Hosts", "Host");
-        if (cc.hosts.isEmpty()) {
-            System.err.println("[AppConfigReader] WARNING: no <Host> entries found in <" + blockTag + ">");
-        }
-
+        cc.hosts    = readStringList(el, "Hosts", "Host");
         cc.user     = getText(el, "User");
         cc.password = getText(el, "Password");
         cc.database = getText(el, "Database");
         return cc;
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    //  Перегрузка readStringList для Element (не Document)
     // ─────────────────────────────────────────────────────────────────
     private static List<String> readStringList(Element parent, String blockTag, String itemTag) {
         List<String> result = new ArrayList<>();

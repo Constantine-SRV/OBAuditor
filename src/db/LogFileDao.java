@@ -8,6 +8,9 @@ import java.util.Map;
 
 /**
  * DAO для таблицы logfiles в базе admintools.
+ *
+ * Все операции фильтруются по collector_id — каждый сервис
+ * видит и меняет только свои записи.
  */
 public class LogFileDao {
 
@@ -18,15 +21,15 @@ public class LogFileDao {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    /** Загрузить все записи для заданной директории. Ключ: fileName */
-    // ─────────────────────────────────────────────────────────────────
-    public Map<String, LogFileRecord> loadByDir(String fileDir) throws SQLException {
+    /** Загрузить записи для данного коллектора и директории. Ключ: fileName */
+    public Map<String, LogFileRecord> loadByDir(String collectorId, String fileDir) throws SQLException {
         Map<String, LogFileRecord> result = new HashMap<>();
-        String sql = "SELECT id, file_dir, file_name, file_type, file_size, " +
-                "last_line_num, last_timestamp, last_tid, last_trace_id " +
-                "FROM logfiles WHERE file_dir = ?";
+        String sql = "SELECT id, collector_id, file_dir, file_name, file_type, file_size, " +
+                "last_line_num, last_timestamp, last_tid, last_trace_id, file_ip " +
+                "FROM logfiles WHERE collector_id = ? AND file_dir = ?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, fileDir);
+            ps.setString(1, collectorId);
+            ps.setString(2, fileDir);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     LogFileRecord r = map(rs);
@@ -38,22 +41,23 @@ public class LogFileDao {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    /** Вставить новую запись, вернуть сгенерированный id */
-    // ─────────────────────────────────────────────────────────────────
+    /** Вставить новую запись, заполнить сгенерированный id */
     public void insert(LogFileRecord r) throws SQLException {
         String sql = "INSERT INTO logfiles " +
-                "(file_dir, file_name, file_type, file_size, last_line_num, " +
-                " last_timestamp, last_tid, last_trace_id) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+                "(collector_id, file_dir, file_name, file_type, file_size, last_line_num, " +
+                " last_timestamp, last_tid, last_trace_id, file_ip) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-            ps.setString(1, r.fileDir);
-            ps.setString(2, r.fileName);
-            ps.setString(3, r.fileType);
-            ps.setLong(4, r.fileSize);
-            ps.setLong(5, r.lastLineNum);
-            ps.setString(6, r.lastTimestamp);
-            setNullableInt(ps, 7, r.lastTid);
-            ps.setString(8, r.lastTraceId);
+            ps.setString(1, r.collectorId);
+            ps.setString(2, r.fileDir);
+            ps.setString(3, r.fileName);
+            ps.setString(4, r.fileType);
+            ps.setLong(5, r.fileSize);
+            ps.setLong(6, r.lastLineNum);
+            ps.setString(7, r.lastTimestamp);
+            setNullableInt(ps, 8, r.lastTid);
+            ps.setString(9, r.lastTraceId);
+            ps.setString(10, r.fileIp);
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 if (keys.next()) r.id = keys.getLong(1);
@@ -63,11 +67,10 @@ public class LogFileDao {
 
     // ─────────────────────────────────────────────────────────────────
     /** Обновить состояние после обработки файла */
-    // ─────────────────────────────────────────────────────────────────
     public void update(LogFileRecord r) throws SQLException {
         String sql = "UPDATE logfiles SET " +
                 "file_size = ?, last_line_num = ?, " +
-                "last_timestamp = ?, last_tid = ?, last_trace_id = ? " +
+                "last_timestamp = ?, last_tid = ?, last_trace_id = ?, file_ip = ? " +
                 "WHERE id = ?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, r.fileSize);
@@ -75,7 +78,23 @@ public class LogFileDao {
             ps.setString(3, r.lastTimestamp);
             setNullableInt(ps, 4, r.lastTid);
             ps.setString(5, r.lastTraceId);
-            ps.setLong(6, r.id);
+            ps.setString(6, r.fileIp);
+            ps.setLong(7, r.id);
+            ps.executeUpdate();
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    /**
+     * Обновить только file_ip — вызывается сразу как найден IP в PROXY-логе.
+     * Не ждём конца обработки файла.
+     */
+    public void updateFileIp(LogFileRecord r) throws SQLException {
+        if (r.id == 0) return; // ещё не сохранена в БД
+        String sql = "UPDATE logfiles SET file_ip = ? WHERE id = ?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, r.fileIp);
+            ps.setLong(2, r.id);
             ps.executeUpdate();
         }
     }
@@ -84,6 +103,7 @@ public class LogFileDao {
     private LogFileRecord map(ResultSet rs) throws SQLException {
         LogFileRecord r = new LogFileRecord();
         r.id            = rs.getLong("id");
+        r.collectorId   = rs.getString("collector_id");
         r.fileDir       = rs.getString("file_dir");
         r.fileName      = rs.getString("file_name");
         r.fileType      = rs.getString("file_type");
@@ -92,6 +112,7 @@ public class LogFileDao {
         r.lastTimestamp = rs.getString("last_timestamp");
         r.lastTid       = (Integer) rs.getObject("last_tid");
         r.lastTraceId   = rs.getString("last_trace_id");
+        r.fileIp        = rs.getString("file_ip");
         return r;
     }
 

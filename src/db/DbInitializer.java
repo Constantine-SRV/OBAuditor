@@ -6,10 +6,6 @@ import java.sql.*;
 
 /**
  * Инициализация базы данных при старте приложения.
- *
- * Порядок:
- *   1. Подключаемся к системному тенанту → создаём базу admintools если нет
- *   2. Подключаемся к admintools → создаём таблицы если нет
  */
 public class DbInitializer {
 
@@ -86,16 +82,13 @@ public class DbInitializer {
     /**
      * sessions — одна строка на сессию (логин + логофф).
      *
-     * server_ip      — IP узла-источника лога для UNIQUE KEY (NOT NULL).
+     * server_ip      — IP узла-источника лога (для UNIQUE KEY, NOT NULL DEFAULT '').
      *                  SERVER: из первой строки файла
-     *                  PROXY:  IP прокси-хоста (из первой строки файла, пока "")
-     *
-     * server_node_ip — IP конкретного OBServer-узла:
+     *                  PROXY:  из local_ip:{...} в строке "server session born"
+     * server_node_ip — IP конкретного OBServer к которому подключена сессия:
      *                  SERVER: совпадает с server_ip
-     *                  PROXY:  извлекается из server_ip={192.168.55.205:2881} в строке лога
-     *
-     * from_proxy     — коннект пришёл через OBProxy (from_proxy= в логе SERVER)
-     *
+     *                  PROXY:  из server_ip={192.168.55.205:2881} в строке лога
+     * from_proxy     — коннект пришёл через OBProxy (from_proxy= в SERVER-логе)
      * `ssl`          — зарезервированное слово, в backtick-ах
      */
     private TableDef createSessionsTableSql() {
@@ -130,14 +123,23 @@ public class DbInitializer {
 
     /**
      * logfiles — состояние обработки каждого лог-файла.
-     * last_line_num хранит байтовый offset (не номер строки).
      *
-     * uq_dir_name: prefix(255) на file_dir чтобы не превышать лимит ключа.
+     * collector_id — идентификатор сервиса-коллектора (из config.xml или hostname).
+     *                Входит в UNIQUE KEY — несколько сервисов могут читать файлы
+     *                с одинаковыми локальными путями без коллизий.
+     *
+     * last_line_num — байтовый offset (не номер строки).
+     *
+     * file_ip      — IP узла-источника:
+     *                SERVER: из первой строки файла (address: "IP:port")
+     *                PROXY:  из "server session born" (local_ip:{IP:port}),
+     *                        заполняется при первом нахождении.
      */
     private TableDef createLogFilesTableSql() {
         String ddl =
             "CREATE TABLE `logfiles` (" +
             "  `id`             BIGINT       NOT NULL AUTO_INCREMENT," +
+            "  `collector_id`   VARCHAR(128) NOT NULL COMMENT 'Идентификатор сервиса-коллектора (hostname или IP)'," +
             "  `file_dir`       VARCHAR(512) NOT NULL COMMENT 'Директория лог-файла'," +
             "  `file_name`      VARCHAR(256) NOT NULL COMMENT 'Имя файла'," +
             "  `file_type`      VARCHAR(16)  NOT NULL COMMENT 'SERVER или PROXY'," +
@@ -146,9 +148,11 @@ public class DbInitializer {
             "  `last_timestamp` VARCHAR(32)      NULL COMMENT 'Временная метка последней обработанной записи'," +
             "  `last_tid`       INT              NULL COMMENT 'Thread ID последней обработанной записи'," +
             "  `last_trace_id`  VARCHAR(64)      NULL COMMENT 'Trace ID последней обработанной записи'," +
+            "  `file_ip`        VARCHAR(64)      NULL COMMENT 'IP узла-источника лога'," +
             "  PRIMARY KEY (`id`)," +
-            "  UNIQUE KEY `uq_dir_name` (`file_dir`(255), `file_name`)," +
-            "  KEY `idx_file_type` (`file_type`)" +
+            "  UNIQUE KEY `uq_collector_dir_name` (`collector_id`, `file_dir`(255), `file_name`)," +
+            "  KEY `idx_file_type` (`file_type`)," +
+            "  KEY `idx_collector`  (`collector_id`)" +
             ") COMMENT = 'Состояние обработки лог-файлов OceanBase'";
         return new TableDef("logfiles", ddl);
     }
