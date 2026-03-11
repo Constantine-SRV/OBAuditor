@@ -3,6 +3,8 @@ package db;
 import model.LoginEvent;
 
 import java.sql.*;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * DAO для таблицы sessions.
@@ -10,11 +12,18 @@ import java.sql.*;
  * INSERT IGNORE — дубли при повторной обработке файла тихо игнорируются
  * благодаря UNIQUE KEY uk_sess (source, server_ip, cluster_name, session_id, login_time).
  *
- * server_node_ip — IP конкретного OBServer-узла:
- *   SERVER: совпадает с fileServerIp (из первой строки файла)
- *   PROXY:  берётся из e.serverIp (server_ip={192.168.55.205:2881} из строки лога)
+ * Закрытие сессий (logoff_time):
+ *   updateLogoff() — UPDATE по proxy_sessid, закрывает SERVER + PROXY строки одним запросом.
  *
- * Примечание: `ssl` — зарезервированное слово в OceanBase/MySQL, везде в backtick-ах.
+ * syncFailedProxySessions() — вызывается в конце каждого прогона.
+ *   Закрывает PROXY-строки для которых SERVER зафиксировал ошибку входа:
+ *   PROXY видит соединение как успешное (is_success=1), не зная что OBServer отклонил логин.
+ *   Синхронизируем logoff_time и error_code из SERVER-строки.
+ *
+ * BIGINT UNSIGNED и JDBC — везде одно правило:
+ *   Запись: setString(idx, Long.toUnsignedString(val))
+ *   Чтение: Long.parseUnsignedLong(rs.getString("col"))
+ *   rs.getLong() бросает "Out of range" для значений > Long.MAX_VALUE.
  */
 public class SessionDao {
 
@@ -22,25 +31,52 @@ public class SessionDao {
 
     private static final String INSERT_LOGIN =
             "INSERT IGNORE INTO sessions " +
-            "(source, server_ip, cluster_name, session_id, login_time, " +
-            " is_success, client_ip, tenant_name, user_name, " +
-            " error_code, `ssl`, client_type, proxy_sessid, cs_id, " +
-            " server_node_ip, from_proxy) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                    "(source, server_ip, cluster_name, session_id, login_time, " +
+                    " is_success, client_ip, tenant_name, user_name, " +
+                    " error_code, `ssl`, client_type, proxy_sessid, cs_id, " +
+                    " server_node_ip, from_proxy) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    private static final String LOAD_OPEN =
+            "SELECT proxy_sessid FROM sessions " +
+                    "WHERE server_ip = ? AND logoff_time IS NULL AND is_success = 1 " +
+                    "  AND proxy_sessid IS NOT NULL";
+
+    private static final String UPDATE_LOGOFF =
+            "UPDATE sessions SET logoff_time = ? " +
+                    "WHERE proxy_sessid = ? AND logoff_time IS NULL";
+
+    /**
+     * Закрыть PROXY-строки для которых SERVER зафиксировал неудачный вход.
+     *
+     * Ситуация: PROXY записал сессию как is_success=1 (соединение установлено),
+     * но OBServer отклонил логин — SERVER записал is_success=0 с logoff_time почти сразу.
+     * PROXY-строка остаётся с logoff_time=NULL до выполнения этого запроса.
+     *
+     * Копируем из SERVER-строки: logoff_time, is_success=0, error_code.
+     * JOIN по proxy_sessid — попадает в индекс.
+     */
+    private static final String SYNC_FAILED_PROXY =
+            "UPDATE sessions p " +
+                    "JOIN sessions s " +
+                    "  ON  s.proxy_sessid = p.proxy_sessid " +
+                    "  AND s.source       = 'SERVER' " +
+                    "  AND s.is_success   = 0 " +
+                    "  AND s.logoff_time  IS NOT NULL " +
+                    "SET p.logoff_time = s.logoff_time, " +
+                    "    p.is_success  = 0, " +
+                    "    p.error_code  = s.error_code " +
+                    "WHERE p.source      = 'PROXY' " +
+                    "  AND p.logoff_time IS NULL";
 
     public SessionDao(Connection conn) {
         this.conn = conn;
     }
 
-    /**
-     * @param e            событие LOGIN_OK или LOGIN_FAIL
-     * @param fileServerIp IP из первой строки файла (идентификатор узла для UNIQUE KEY)
-     */
+    // ─────────────────────────────────────────────────────────────────
     public void insertLogin(LoginEvent e, String fileServerIp) throws SQLException {
         if (!"LOGIN_OK".equals(e.eventType) && !"LOGIN_FAIL".equals(e.eventType)) return;
 
-        // Для PROXY берём server_node_ip из тела строки лога (точный OBServer-узел)
-        // Для SERVER — совпадает с fileServerIp
         String serverNodeIp = ("PROXY".equals(e.source) && e.serverIp != null && !e.serverIp.isEmpty())
                 ? e.serverIp
                 : (fileServerIp != null ? fileServerIp : "");
@@ -67,6 +103,70 @@ public class SessionDao {
     }
 
     // ─────────────────────────────────────────────────────────────────
+    /**
+     * Загрузить proxy_sessid всех открытых успешных сессий для данного server_ip.
+     * Чтение через getString() + parseUnsignedLong() — getLong() не справляется с UNSIGNED.
+     */
+    public Set<Long> loadOpenProxySessids(String serverIp) throws SQLException {
+        Set<Long> result = new HashSet<>();
+        if (serverIp == null || serverIp.isEmpty()) return result;
+
+        try (PreparedStatement ps = conn.prepareStatement(LOAD_OPEN)) {
+            ps.setString(1, serverIp);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String raw = rs.getString("proxy_sessid");
+                    if (raw != null) {
+                        try {
+                            result.add(Long.parseUnsignedLong(raw));
+                        } catch (NumberFormatException e) {
+                            System.err.println("[SessionDao] Cannot parse proxy_sessid: " + raw);
+                        }
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    /**
+     * Закрыть все открытые сессии с данным proxy_sessid.
+     * Закрывает сразу обе записи (source=SERVER и source=PROXY) одним запросом.
+     *
+     * @return количество обновлённых строк
+     */
+    public int updateLogoff(Long proxySessid, String logoffTime) throws SQLException {
+        if (proxySessid == null) return 0;
+        try (PreparedStatement ps = conn.prepareStatement(UPDATE_LOGOFF)) {
+            ps.setString(1, logoffTime);
+            setUnsignedLong(ps, 2, proxySessid);
+            return ps.executeUpdate();
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    /**
+     * Синхронизировать PROXY-строки с неудачными входами из SERVER.
+     *
+     * Вызывается один раз в конце каждого прогона (после обработки всех файлов).
+     * Закрывает PROXY-строки где SERVER зафиксировал ошибку входа:
+     * копирует logoff_time и error_code, выставляет is_success=0.
+     *
+     * @return количество обновлённых PROXY-строк
+     */
+    public int syncFailedProxySessions() throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            int updated = st.executeUpdate(SYNC_FAILED_PROXY);
+            if (updated > 0) {
+                System.out.printf("[SessionDao] syncFailedProxySessions: closed %d PROXY row(s)%n",
+                        updated);
+            }
+            return updated;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     private void setNullableInt(PreparedStatement ps, int idx, Integer val) throws SQLException {
         if (val == null) ps.setNull(idx, Types.INTEGER);
         else             ps.setInt(idx, val);
@@ -77,10 +177,6 @@ public class SessionDao {
         else             ps.setInt(idx, val ? 1 : 0);
     }
 
-    /**
-     * BIGINT UNSIGNED передаём как строку — иначе значения > Long.MAX_VALUE
-     * при конвертации signed→unsigned дают неверный результат в БД.
-     */
     private void setUnsignedLong(PreparedStatement ps, int idx, Long val) throws SQLException {
         if (val == null) ps.setNull(idx, Types.BIGINT);
         else             ps.setString(idx, Long.toUnsignedString(val));

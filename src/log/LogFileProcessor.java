@@ -1,12 +1,14 @@
 package log;
 
 import db.LogFileDao;
+import db.SessionDao;
 import model.LogFileRecord;
 
 import java.io.*;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -17,15 +19,12 @@ import java.util.regex.Pattern;
 /**
  * Обрабатывает лог-файлы OceanBase из заданных директорий.
  *
- * collectorId — уникальный идентификатор этого экземпляра сервиса.
- *               Хранится в logfiles.collector_id, входит в UNIQUE KEY.
- *               Позволяет нескольким сервисам читать файлы с одинаковыми
- *               локальными путями без коллизий.
- *
- * IP узла (fileIp / server_ip):
- *   SERVER: из первой строки файла: address: "192.168.55.205:2882"
- *   PROXY:  из строк "server session born": local_ip:{192.168.55.200:37288}
- *           — сканируется до первого нахождения, затем берётся из БД.
+ * Перед чтением каждого файла:
+ *   1. Определяется server_ip (fileIp) — из первой строки или local_ip в теле лога
+ *   2. Загружаются открытые сессии из БД: Set<Long> openSessions (proxy_sessid)
+ *   3. В процессе чтения:
+ *      - LOGIN_OK → insert + добавить proxy_sessid в set
+ *      - LOGOFF   → найти proxy_sessid в set, вызвать updateLogoff, убрать из set
  *
  * last_line_num хранит байтовый OFFSET — FileChannel.position(offset) пропускает
  * уже прочитанное без построчного перебора.
@@ -56,11 +55,13 @@ public class LogFileProcessor {
 
     private final Connection  conn;
     private final LogFileDao  dao;
+    private final SessionDao  sessionDao;
     private final String      collectorId;
 
     public LogFileProcessor(Connection conn, String collectorId) {
         this.conn        = conn;
         this.dao         = new LogFileDao(conn);
+        this.sessionDao  = new SessionDao(conn);
         this.collectorId = collectorId;
     }
 
@@ -100,6 +101,7 @@ public class LogFileProcessor {
             return;
         }
 
+        // Ротированные файлы сначала, активный — последним
         Arrays.sort(files, (a, b) -> {
             boolean aActive = isActiveLog(a.getName(), namePrefixes[0]);
             boolean bActive = isActiveLog(b.getName(), namePrefixes[0]);
@@ -142,7 +144,6 @@ public class LogFileProcessor {
             record.lastTimestamp = null;
             record.lastTid       = null;
             record.lastTraceId   = null;
-            // fileIp не сбрасываем — хост не меняется при ротации
         }
 
         if (!isNew && currentSize == record.fileSize && startOffset >= currentSize) {
@@ -154,19 +155,26 @@ public class LogFileProcessor {
         System.out.printf("[LogFileProcessor] Processing %s (size=%d, offset=%d)%n",
                 fileName, currentSize, startOffset);
 
-        // ── Определяем IP узла ───────────────────────────────────────
+        // ── IP узла ──────────────────────────────────────────────────
         String serverIp = record.fileIp != null ? record.fileIp : "";
-
         if (serverIp.isEmpty() && "SERVER".equals(fileType)) {
             serverIp      = readServerIpFromFirstLine(file);
             record.fileIp = serverIp;
         }
-
         System.out.printf("[LogFileProcessor] %s — file_ip=%s%n", fileName,
                 serverIp.isEmpty() ? "(searching in log...)" : serverIp);
 
-        // ── Читаем и обрабатываем ────────────────────────────────────
-        LogLineHandler handler = new LogLineHandler(fileType, fileName, serverIp, conn);
+        // ── Загружаем открытые сессии из БД ──────────────────────────
+        // Фильтр по serverIp держит Set компактным.
+        // Если serverIp ещё не известен (PROXY, первый запуск) — грузим пустой Set,
+        // они заполнятся из LOGIN_OK событий текущего файла.
+        Set<Long> openSessions = loadOpenSessions(serverIp);
+        System.out.printf("[LogFileProcessor] %s — loaded %d open sessions%n",
+                fileName, openSessions.size());
+
+        // ── Читаем и обрабатываем ─────────────────────────────────────
+        LogLineHandler handler = new LogLineHandler(
+                fileType, fileName, serverIp, conn, openSessions);
         readAndProcess(file, startOffset, record, handler, isNew);
 
         record.fileSize = currentSize;
@@ -179,10 +187,23 @@ public class LogFileProcessor {
         }
 
         System.out.printf(
-                "[LogFileProcessor] %s — done. processed=%d skipped=%d events=%d inserted=%d offset=%d ip=%s%n",
-                fileName, handler.getProcessedCount(), handler.getSkippedCount(),
-                handler.getEventCount(), handler.getInsertedCount(),
-                record.lastLineNum, record.fileIp);
+                "[LogFileProcessor] %s — done. processed=%d events=%d " +
+                        "inserted=%d logoff=%d logoffMiss=%d offset=%d ip=%s%n",
+                fileName,
+                handler.getProcessedCount(), handler.getEventCount(),
+                handler.getInsertedCount(), handler.getLogoffCount(),
+                handler.getLogoffMissCount(), record.lastLineNum, record.fileIp);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    private Set<Long> loadOpenSessions(String serverIp) {
+        if (serverIp == null || serverIp.isEmpty()) return new HashSet<>();
+        try {
+            return sessionDao.loadOpenProxySessids(serverIp);
+        } catch (SQLException ex) {
+            System.err.println("[LogFileProcessor] Failed to load open sessions: " + ex.getMessage());
+            return new HashSet<>();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────

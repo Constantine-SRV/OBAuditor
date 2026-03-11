@@ -13,7 +13,7 @@
 10. [Запись данных в БД](#запись-данных-в-бд)
 11. [Предотвращение дублей и пропусков](#предотвращение-дублей-и-пропусков)
 12. [Поддержка нескольких экземпляров сервиса](#поддержка-нескольких-экземпляров-сервиса)
-13. [Обработка LOGOFF — не реализовано](#обработка-logoff--не-реализовано)
+13. [Обработка LOGOFF](#обработка-logoff)
 14. [Поток данных end-to-end](#поток-данных-end-to-end)
 
 ---
@@ -42,10 +42,12 @@ src/
 ├── db/
 │   ├── DbInitializer.java           # Создаёт базу admintools и таблицы sessions, logfiles
 │   ├── LogFileDao.java              # CRUD для таблицы logfiles (с фильтром по collectorId)
-│   └── SessionDao.java              # INSERT IGNORE в таблицу sessions
+│   └── SessionDao.java              # INSERT IGNORE логинов; loadOpenProxySessids(); updateLogoff()
 └── log/
-    ├── LogFileProcessor.java        # Оркестратор: обходит директории, управляет offset-ами
-    ├── LogLineHandler.java          # Диспетчер строк → парсер → SessionDao.insertLogin()
+    ├── LogFileProcessor.java        # Оркестратор: обходит директории, управляет offset-ами,
+    │                                #   загружает Set<Long> openSessions перед чтением файла
+    ├── LogLineHandler.java          # Диспетчер строк → парсер → SessionDao;
+    │                                #   ведёт Set открытых сессий, обрабатывает LOGOFF
     ├── LogLine.java                 # POJO одной строки лога (raw, timestamp, tid, traceId)
     ├── ObServerLineParser.java      # Парсер observer.log (статический, без состояния)
     └── ObProxyLineParser.java       # Парсер obproxy.log (stateful, HashMap по cs_id)
@@ -85,7 +87,7 @@ src/
 | `error_code` | INT | Код ошибки при FAIL |
 | `` `ssl` `` | CHAR(1) | Y/N (только SERVER) — backtick: зарезервированное слово |
 | `client_type` | VARCHAR(16) | JDBC / JAVA / OCI / OBCLIENT / MYSQL_CLI |
-| `proxy_sessid` | BIGINT UNSIGNED | proxy_sessid |
+| `proxy_sessid` | BIGINT UNSIGNED | proxy_sessid — ключ для закрытия сессий через LOGOFF |
 | `cs_id` | BIGINT UNSIGNED | Client session id (PROXY) |
 | `server_node_ip` | VARCHAR(64) | IP OBServer-узла из тела строки лога |
 | `from_proxy` | TINYINT(1) | 1 = коннект пришёл через OBProxy |
@@ -283,10 +285,10 @@ server_ip={192.168.55.205:2881}
 | 1 | `error_transfer` + `OB_MYSQL_COM_LOGIN` | `sm_id` (как cs_id), `client_ip`, `timestamp` → `failMap` |
 | 2 | `client session do_io_close` | `cs_id`, `proxy_sessid`, `cluster`, `tenant`, `user` → испускаем событие |
 
-**LOGOFF** — одна строка:
+**LOGOFF** — одна строка `handle_server_connection_break` + `COM_QUIT`:
 ```
-handle_server_connection_break + COM_QUIT
-proxy_user_name=user@tenant#cluster
+[ts] ... handle_server_connection_break ... COM_QUIT ...
+  cs_id=..., proxy_sessid=..., proxy_user_name=user@tenant#cluster, client_ip={...}
 ```
 
 ---
@@ -313,14 +315,14 @@ if ("proxyro".equals(info.user) || info.tenant == null) return; // не клад
 
 ## Запись данных в БД
 
-**Класс:** `LogLineHandler.handle()` → `SessionDao.insertLogin()`
+**Класс:** `LogLineHandler.handle()` → `SessionDao`
 
 ```
 LogLineHandler.handle(LogLine):
   1. Вызвать парсер (SERVER → ObServerLineParser.parse(), PROXY → proxyParser.parse())
   2. Если null → пропустить
   3. Если LOGIN_OK или LOGIN_FAIL → sessionDao.insertLogin(event, serverIp)
-  4. Если LOGOFF → пока только логируем (не реализовано в БД)
+  4. Если LOGOFF → sessionDao.updateLogoff(proxySessid, eventTime)
 ```
 
 **`SessionDao.insertLogin()`:**
@@ -333,8 +335,9 @@ INSERT IGNORE INTO sessions
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ```
 
-`BIGINT UNSIGNED` передаётся как строка через `Long.toUnsignedString(val)` — иначе значения
-выше `Long.MAX_VALUE` дают неверный результат при конвертации signed→unsigned в JDBC.
+**BIGINT UNSIGNED и JDBC** — везде одно правило:
+- **Запись:** `setString(idx, Long.toUnsignedString(val))` — избегаем signed overflow
+- **Чтение:** `Long.parseUnsignedLong(rs.getString("col"))` — `rs.getLong()` бросает "Out of range" для значений > Long.MAX_VALUE
 
 `server_node_ip`:
 - SOURCE=SERVER: совпадает с `fileServerIp`
@@ -388,34 +391,79 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
 ---
 
-## Обработка LOGOFF — не реализовано
+## Обработка LOGOFF
 
-**Текущее состояние:** LOGOFF-события парсятся корректно в `ObServerLineParser.parseLogoff()`
-и `ObProxyLineParser.handleLogoff()`, `LoginEvent` создаётся с `eventType=LOGOFF`,
-но `LogLineHandler` только логирует их в stdout — в БД не пишет.
+**Классы:** `SessionDao.loadOpenProxySessids()`, `SessionDao.updateLogoff()`,
+`LogFileProcessor.loadOpenSessions()`, `LogLineHandler.handleLogoff()`
 
-**Что нужно реализовать:**
+### Ключ для закрытия — proxy_sessid
 
+`proxy_sessid` — 64-битное значение которое **кодирует `proxy_id` экземпляра OBProxy** в старших битах
+(версия 1: 8 бит, до 255 проксей; версия 2: 13 бит, до 8191 проксей) плюс счётчик сессий в младших.
+Благодаря этому `proxy_sessid` **глобально уникален в рамках кластера** при условии
+что каждый OBProxy настроен с уникальным `proxy_id`.
+
+Это позволяет закрыть **обе строки одновременно** (source=SERVER и source=PROXY)
+одним UPDATE без разделения по source:
 ```sql
-UPDATE sessions
-SET logoff_time = ?
-WHERE source = ?
-  AND server_ip = ?
-  AND session_id = ?
-  AND logoff_time IS NULL
-ORDER BY login_time DESC
-LIMIT 1
+UPDATE sessions SET logoff_time = ?
+WHERE proxy_sessid = ? AND logoff_time IS NULL
 ```
 
-**Нюансы:**
-- SERVER LOGOFF содержит `sessid` + `proxy_sessid` + `tenant_id` (число, не имя)
-- PROXY LOGOFF содержит `cs_id` + `proxy_sessid` + `user@tenant#cluster`
-- Для производительности стоит загружать открытые сессии (`logoff_time IS NULL`)
-  в `HashSet<Long>` перед обработкой файла и обновлять только те что реально встречаются
-- `sessions.idx_open (logoff_time)` — индекс для быстрого поиска открытых сессий
+### Set открытых сессий
 
-**Классы которые затронет реализация:** `SessionDao` (новый метод `updateLogoff()`),
-`LogLineHandler` (вызов `sessionDao.updateLogoff()` для LOGOFF событий).
+Перед началом чтения каждого файла `LogFileProcessor.loadOpenSessions()` загружает из БД
+`proxy_sessid` всех открытых успешных сессий этого узла:
+
+```sql
+-- SessionDao.loadOpenProxySessids(serverIp)
+SELECT proxy_sessid FROM sessions
+WHERE server_ip = ? AND logoff_time IS NULL AND is_success = 1
+  AND proxy_sessid IS NOT NULL
+```
+
+Результат — `Set<Long> openSessions` — передаётся в конструктор `LogLineHandler`.
+
+В процессе чтения файла Set обновляется:
+- **LOGIN_OK** → `openSessions.add(proxySessid)` (новые сессии из текущего файла)
+- **LOGOFF** → `openSessions.remove(proxySessid)` + `updateLogoff()`
+
+### Алгоритм обработки LOGOFF в LogLineHandler
+
+```
+handleLogoff(event):
+  proxySessid = event.proxySessid  (SERVER) или event.proxySessionId  (PROXY)
+
+  если proxySessid == null:
+    → пропустить: прямое подключение без прокси, proxy_sessid отсутствует
+
+  inSet = openSessions.remove(proxySessid)
+
+  если НЕ inSet:
+    → сессия открылась до начала файла или до первого запуска сервиса
+    → fallback: всё равно вызываем updateLogoff (может закрыть "старую" сессию в БД)
+    → logoffMissCount++
+
+  updated = sessionDao.updateLogoff(proxySessid, event.eventTime)
+    если updated > 0 → logoffCount++   // закрыты SERVER + PROXY строки
+    если updated == 0 → сессия уже закрыта или не найдена
+```
+
+### Счётчики в итоговой строке лога
+
+```
+[LogFileProcessor] file.log — done. processed=N events=N inserted=N
+    logoff=N        // успешно закрытых сессий (updateLogoff вернул > 0)
+    logoffMiss=N    // логоффы для сессий не найденных в Set (fallback)
+    offset=N ip=...
+```
+
+### Прямые подключения без прокси
+
+Сессии с `from_proxy=false` (клиент подключён напрямую к OBServer, минуя OBProxy)
+могут иметь `proxy_sessid=0` или NULL в SERVER-логе.
+Такие LOGOFF строки пропускаются: `LOGOFF skipped (no proxy_sessid)`.
+Закрытие через `proxy_sessid` для них невозможно.
 
 ---
 
@@ -435,32 +483,46 @@ Main.main()
     │      └─ CREATE TABLE sessions, logfiles (если нет)
     │
     └─ LogFileProcessor(conn, collectorId)
-           ├─ processServerDirs() ─────────────────────────────────────┐
-           └─ processProxyDirs()                                       │
-                  │                                                    │
-                  ▼                                                    │
-           processDirectory(dirPath, fileType)                         │
-                  ├─ LogFileDao.loadByDir(collectorId, dirPath)        │
-                  ├─ File.listFiles() → сортировка (ротированные 1-ми)│
-                  └─ processFile(file)                                 │
-                         ├─ Определить startOffset (из logfiles)       │
-                         ├─ shouldResetToStart() ?                     │
-                         ├─ readServerIpFromFirstLine()  [SERVER]      │
-                         │                                             │
-                         ├─ LogLineHandler(fileType, fileName,         │
-                         │                serverIp, conn)              │
-                         │                                             │
-                         └─ readAndProcess(file, offset)               │
-                                ├─ FileChannel.position(offset)        │
-                                ├─ for each line:                      │
-                                │    [PROXY] найти local_ip → fileIp   │
-                                │    LogLineHandler.handle(LogLine)    │
-                                │         ├─ ObServerLineParser.parse()│
-                                │         │  или proxyParser.parse()   │
-                                │         └─ SessionDao.insertLogin()  │
-                                │              └─ INSERT IGNORE INTO   │
-                                │                 sessions (...)       │
-                                └─ record.lastLineNum = channel.pos()  │
-                                                                       │
-                  LogFileDao.insert() или update()  ◄──────────────────┘
+           ├─ processServerDirs()
+           └─ processProxyDirs()
+                  │
+                  ▼
+           processDirectory(dirPath, fileType)
+                  ├─ LogFileDao.loadByDir(collectorId, dirPath)
+                  ├─ File.listFiles() → сортировка (ротированные 1-ми)
+                  └─ processFile(file)
+                         ├─ Определить startOffset (из logfiles)
+                         ├─ shouldResetToStart() ?
+                         ├─ readServerIpFromFirstLine()  [SERVER]
+                         ├─ SessionDao.loadOpenProxySessids(serverIp)
+                         │      → Set<Long> openSessions
+                         │
+                         ├─ LogLineHandler(fileType, fileName,
+                         │                serverIp, conn, openSessions)
+                         │
+                         └─ readAndProcess(file, offset)
+                                ├─ FileChannel.position(offset)
+                                ├─ for each line:
+                                │    [PROXY] найти local_ip → fileIp
+                                │    LogLineHandler.handle(LogLine)
+                                │         ├─ ObServerLineParser.parse()
+                                │         │  или proxyParser.parse()
+                                │         │
+                                │         ├─ LOGIN_OK/FAIL:
+                                │         │    SessionDao.insertLogin()
+                                │         │    → INSERT IGNORE INTO sessions
+                                │         │    LOGIN_OK: openSessions.add(proxySessid)
+                                │         │
+                                │         └─ LOGOFF:
+                                │              openSessions.remove(proxySessid)
+                                │              SessionDao.updateLogoff()
+                                │              → UPDATE sessions
+                                │                SET logoff_time = ?
+                                │                WHERE proxy_sessid = ?
+                                │                  AND logoff_time IS NULL
+                                │                (закрывает SERVER + PROXY сразу)
+                                │
+                                └─ record.lastLineNum = channel.pos()
+
+                  LogFileDao.insert() или update()
 ```

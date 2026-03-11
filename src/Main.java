@@ -1,4 +1,5 @@
 import db.DbInitializer;
+import db.SessionDao;
 import log.LogFileProcessor;
 import model.AppConfig;
 import model.AppConfigReader;
@@ -61,7 +62,7 @@ public class Main {
             return;
         }
 
-        // 5. Обработка логов
+        // 5. Обработка логов + синхронизация
         try {
             Connection conn = DriverManager.getConnection(
                     config.systemTenantConnection.toJdbcUrl("admintools"),
@@ -69,9 +70,16 @@ public class Main {
                     config.systemTenantConnection.password
             );
 
+            // 5a. Читаем все лог-файлы
             LogFileProcessor processor = new LogFileProcessor(conn, config.collectorId);
             processor.processServerDirs(config.obServerLogPaths);
             processor.processProxyDirs(config.obProxyLogPaths);
+
+            // 5b. Закрыть PROXY-строки для неудачных входов.
+            // PROXY видит соединение как успешное (is_success=1), не зная об ошибке OBServer.
+            // SERVER к этому моменту уже обработан — копируем logoff_time и error_code.
+            SessionDao sessionDao = new SessionDao(conn);
+            sessionDao.syncFailedProxySessions();
 
             conn.close();
         } catch (Exception e) {
