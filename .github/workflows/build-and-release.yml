@@ -1,4 +1,4 @@
-name: Build and Release
+name: Build and Release Fat JAR
 
 on:
   workflow_dispatch:
@@ -6,10 +6,10 @@ on:
       command:
         description: 'Build command'
         required: true
-        default: 'build-all'
+        default: 'build-fatjar'
         type: choice
         options:
-          - build-all
+          - build-fatjar
 
 permissions:
   contents: write
@@ -21,8 +21,7 @@ jobs:
     env:
       APP_NAME: OBAuditor
       RELEASE_TAG: latest_release
-      DIST_DIR: dist/OBAuditor
-      JAR_NAME: ob-auditor.jar
+      JAR_NAME: ob-auditor-fat.jar
       LIB_JAR: lib/oceanbase-client-2.4.14.jar
 
     steps:
@@ -35,69 +34,45 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Show project structure
+      - name: Compile project
         run: |
-          echo "=== Root ==="
-          ls -lah
-          echo
-          echo "=== src ==="
-          find src -maxdepth 3 -type f | sort
-          echo
-          echo "=== lib ==="
-          ls -lah lib
-
-      - name: Compile sources
-        run: |
-          rm -rf out dist
+          rm -rf out build merged
           mkdir -p out
           find src -name "*.java" | sort > sources.txt
-          echo "=== Sources to compile ==="
-          cat sources.txt
-          echo
           javac -encoding UTF-8 -cp "${LIB_JAR}" -d out @sources.txt
+
+      - name: Unpack dependency jar
+        run: |
+          mkdir -p build/dependency
+          cd build/dependency
+          jar xf "../../${LIB_JAR}"
+
+          # Удаляем подписи, иначе merged jar может не запускаться
+          rm -f META-INF/*.SF META-INF/*.RSA META-INF/*.DSA || true
+
+          cd ../..
+
+      - name: Assemble fat jar content
+        run: |
+          mkdir -p merged
+          cp -r out/* merged/ || true
+          cp -r build/dependency/* merged/ || true
 
       - name: Create manifest
         run: |
           cat > MANIFEST.MF <<'EOF'
           Manifest-Version: 1.0
           Main-Class: Main
-          Class-Path: lib/oceanbase-client-2.4.14.jar
           EOF
-          echo "=== MANIFEST.MF ==="
-          cat MANIFEST.MF
 
-      - name: Build distribution
+      - name: Build fat jar
         run: |
-          mkdir -p "${DIST_DIR}/lib"
+          jar cfm "${JAR_NAME}" MANIFEST.MF -C merged .
+          ls -lh "${JAR_NAME}"
 
-          jar cfm "${DIST_DIR}/${JAR_NAME}" MANIFEST.MF -C out .
-
-          cp "${LIB_JAR}" "${DIST_DIR}/lib/"
-
-          cat > "${DIST_DIR}/run.sh" <<'EOF'
-          #!/usr/bin/env bash
-          set -e
-          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          cd "${SCRIPT_DIR}"
-          java -jar ob-auditor.jar "$@"
-          EOF
-          chmod +x "${DIST_DIR}/run.sh"
-
-          cat > "${DIST_DIR}/run.cmd" <<'EOF'
-          @echo off
-          java -jar ob-auditor.jar %*
-          EOF
-
-          echo "=== Distribution content ==="
-          find dist -maxdepth 4 -type f | sort
-
-      - name: Pack distribution
+      - name: Test jar startup
         run: |
-          cd dist
-          zip -r "../${APP_NAME}-dist.zip" "${APP_NAME}"
-          cd ..
-          echo "=== Final archive ==="
-          ls -lh "${APP_NAME}-dist.zip"
+          java -jar "${JAR_NAME}" || true
 
       - name: Install GitHub CLI
         run: |
@@ -113,12 +88,12 @@ jobs:
           fi
           git tag -d "${RELEASE_TAG}" >/dev/null 2>&1 || true
 
-      - name: Create release
+      - name: Create release with fat jar
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${RELEASE_TAG}" \
-            "./${APP_NAME}-dist.zip" \
+            "./${JAR_NAME}" \
             --title "Release ${RELEASE_TAG}" \
-            --notes "Automated build for ${APP_NAME} from commit ${GITHUB_SHA}" \
+            --notes "Automated fat jar build for ${APP_NAME} from commit ${GITHUB_SHA}" \
             --target "${GITHUB_SHA}"
