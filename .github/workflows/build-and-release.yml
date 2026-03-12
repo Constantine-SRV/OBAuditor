@@ -1,0 +1,124 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Build command'
+        required: true
+        default: 'build-all'
+        type: choice
+        options:
+          - build-all
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      APP_NAME: OBAuditor
+      RELEASE_TAG: latest_release
+      DIST_DIR: dist/OBAuditor
+      JAR_NAME: ob-auditor.jar
+      LIB_JAR: lib/oceanbase-client-2.4.14.jar
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Show project structure
+        run: |
+          echo "=== Root ==="
+          ls -lah
+          echo
+          echo "=== src ==="
+          find src -maxdepth 3 -type f | sort
+          echo
+          echo "=== lib ==="
+          ls -lah lib
+
+      - name: Compile sources
+        run: |
+          rm -rf out dist
+          mkdir -p out
+          find src -name "*.java" | sort > sources.txt
+          echo "=== Sources to compile ==="
+          cat sources.txt
+          echo
+          javac -encoding UTF-8 -cp "${LIB_JAR}" -d out @sources.txt
+
+      - name: Create manifest
+        run: |
+          cat > MANIFEST.MF <<'EOF'
+          Manifest-Version: 1.0
+          Main-Class: Main
+          Class-Path: lib/oceanbase-client-2.4.14.jar
+          EOF
+          echo "=== MANIFEST.MF ==="
+          cat MANIFEST.MF
+
+      - name: Build distribution
+        run: |
+          mkdir -p "${DIST_DIR}/lib"
+
+          jar cfm "${DIST_DIR}/${JAR_NAME}" MANIFEST.MF -C out .
+
+          cp "${LIB_JAR}" "${DIST_DIR}/lib/"
+
+          cat > "${DIST_DIR}/run.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -e
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          cd "${SCRIPT_DIR}"
+          java -jar ob-auditor.jar "$@"
+          EOF
+          chmod +x "${DIST_DIR}/run.sh"
+
+          cat > "${DIST_DIR}/run.cmd" <<'EOF'
+          @echo off
+          java -jar ob-auditor.jar %*
+          EOF
+
+          echo "=== Distribution content ==="
+          find dist -maxdepth 4 -type f | sort
+
+      - name: Pack distribution
+        run: |
+          cd dist
+          zip -r "../${APP_NAME}-dist.zip" "${APP_NAME}"
+          cd ..
+          echo "=== Final archive ==="
+          ls -lh "${APP_NAME}-dist.zip"
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Delete existing release if exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release delete "${RELEASE_TAG}" --yes --cleanup-tag
+          fi
+          git tag -d "${RELEASE_TAG}" >/dev/null 2>&1 || true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${RELEASE_TAG}" \
+            "./${APP_NAME}-dist.zip" \
+            --title "Release ${RELEASE_TAG}" \
+            --notes "Automated build for ${APP_NAME} from commit ${GITHUB_SHA}" \
+            --target "${GITHUB_SHA}"
