@@ -22,6 +22,10 @@ public class ObServerLineParser {
     private static final Pattern P_TIMESTAMP = Pattern.compile(
             "^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d+)\\]");
 
+    // direct_client_ip — реальный IP источника (при proxy = IP клиента, не proxy)
+    private static final Pattern P_DIRECT_CLIENT_IP = Pattern.compile(
+            "\\bdirect_client_ip=(?:\"([^\"]+)\"|([^,)]+))");
+
     private static final Pattern P_CLIENT_IP = Pattern.compile(
             "\\bclient_ip=(?:\"([^\"]+)\"|([^,)]+))");
     private static final Pattern P_TENANT = Pattern.compile(
@@ -57,17 +61,21 @@ public class ObServerLineParser {
 
     // ─────────────────────────────────────────────────────────────────
     private static LoginEvent parseLogin(String line) {
-        String userName = extractStr(P_USER, line);
-        String clientIp = extractClientIp(line);
+        String userName       = extractStr(P_USER, line);
+        String directClientIp = extractDirectClientIp(line);
 
-        // Фильтруем служебные коннекты
-        if ("ocp_monitor".equals(userName) || "proxy_ro".equals(userName)) return null;
-        if ("127.0.0.1".equals(clientIp) && "root".equals(userName))       return null;
+        // Служебные пользователи — всегда исключаем
+        if ("ocp_monitor".equals(userName) || "proxy_ro".equals(userName) || "proxyro".equals(userName)) return null;
+
+        // Loopback = внутренние соединения OBAgent и подобных.
+        // Раскомментировать если шум от локальных подключений станет проблемой.
+        // if ("127.0.0.1".equals(directClientIp)) return null;
 
         LoginEvent e = new LoginEvent();
         e.source     = "SERVER";
         e.eventTime  = extractStr(P_TIMESTAMP, line);
-        e.clientIp   = clientIp;
+        // Используем direct_client_ip (реальный источник), fallback на client_ip
+        e.clientIp   = directClientIp != null ? directClientIp : extractClientIp(line);
         e.tenantName = extractStr(P_TENANT, line);
         e.userName   = userName;
 
@@ -147,6 +155,15 @@ public class ObServerLineParser {
             if (g != null && !g.isEmpty()) return g.trim();
         }
         return null;
+    }
+
+    private static String extractDirectClientIp(String line) {
+        Matcher m = P_DIRECT_CLIENT_IP.matcher(line);
+        if (!m.find()) return null;
+        String g1 = m.group(1);
+        String g2 = m.group(2);
+        String ip = (g1 != null) ? g1 : g2;
+        return ip != null ? ip.trim() : null;
     }
 
     private static String extractClientIp(String line) {
