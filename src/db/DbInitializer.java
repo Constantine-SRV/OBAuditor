@@ -1,5 +1,6 @@
 package db;
 
+import model.AppConfig;
 import model.ConnectionConfig;
 
 import java.sql.*;
@@ -11,15 +12,20 @@ public class DbInitializer {
 
     private static final String TARGET_DB = "admintools";
 
-    private final ConnectionConfig config;
+    private final ConnectionConfig   config;
+    private final AppConfig.LogLevel logLevel;
 
-    public DbInitializer(ConnectionConfig config) {
-        this.config = config;
+    public DbInitializer(ConnectionConfig config, AppConfig.LogLevel logLevel) {
+        this.config   = config;
+        this.logLevel = logLevel != null ? logLevel : AppConfig.LogLevel.INFO;
     }
+
+    private void info(String msg)  { if (logLevel != AppConfig.LogLevel.ERROR) System.out.println(msg); }
+    private void debug(String msg) { if (logLevel == AppConfig.LogLevel.DEBUG) System.out.println(msg); }
 
     // ─────────────────────────────────────────────────────────────────
     public void initialize() throws SQLException {
-        System.out.println("[DbInitializer] Starting DB initialization...");
+        debug("[DbInitializer] Starting DB initialization...");
 
         try (Connection conn = openConnection(config.database)) {
             ensureDatabase(conn, TARGET_DB);
@@ -30,7 +36,7 @@ public class DbInitializer {
             ensureTable(conn, createLogFilesTableSql());
         }
 
-        System.out.println("[DbInitializer] Initialization complete.");
+        debug("[DbInitializer] Initialization complete.");
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -41,16 +47,16 @@ public class DbInitializer {
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 if (rs.getInt(1) > 0) {
-                    System.out.println("[DbInitializer] Database '" + dbName + "' already exists.");
+                    debug("[DbInitializer] Database '" + dbName + "' already exists.");
                     return;
                 }
             }
         }
-        System.out.println("[DbInitializer] Creating database '" + dbName + "'...");
+        debug("[DbInitializer] Creating database '" + dbName + "'...");
         try (Statement st = conn.createStatement()) {
             st.executeUpdate("CREATE DATABASE `" + dbName + "` DEFAULT CHARACTER SET utf8mb4");
         }
-        System.out.println("[DbInitializer] Database '" + dbName + "' created.");
+        info("[DbInitializer] Database '" + dbName + "' created.");
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -63,16 +69,16 @@ public class DbInitializer {
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 if (rs.getInt(1) > 0) {
-                    System.out.println("[DbInitializer] Table '" + def.name + "' already exists.");
+                    debug("[DbInitializer] Table '" + def.name + "' already exists.");
                     return;
                 }
             }
         }
-        System.out.println("[DbInitializer] Creating table '" + def.name + "'...");
+        debug("[DbInitializer] Creating table '" + def.name + "'...");
         try (Statement st = conn.createStatement()) {
             st.executeUpdate(def.ddl);
         }
-        System.out.println("[DbInitializer] Table '" + def.name + "' created.");
+        info("[DbInitializer] Table '" + def.name + "' created.");
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -93,31 +99,31 @@ public class DbInitializer {
      */
     private TableDef createSessionsTableSql() {
         String ddl =
-            "CREATE TABLE `sessions` (" +
-            "  `id`             BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT," +
-            "  `source`         VARCHAR(8)       NOT NULL COMMENT 'SERVER или PROXY'," +
-            "  `server_ip`      VARCHAR(64)      NOT NULL DEFAULT '' COMMENT 'IP узла-источника лога (для UK)'," +
-            "  `cluster_name`   VARCHAR(128)     NOT NULL DEFAULT '' COMMENT 'Имя кластера (PROXY) или пустая строка'," +
-            "  `session_id`     BIGINT UNSIGNED  NOT NULL COMMENT 'sessid (SERVER) или server_sessid (PROXY)'," +
-            "  `login_time`     DATETIME(6)      NOT NULL COMMENT 'Время логина из лога'," +
-            "  `logoff_time`    DATETIME(6)          NULL COMMENT 'Время логоффа, NULL = сессия открыта'," +
-            "  `is_success`     TINYINT(1)       NOT NULL COMMENT '1=LOGIN_OK 0=LOGIN_FAIL'," +
-            "  `client_ip`      VARCHAR(64)          NULL COMMENT 'IP клиента'," +
-            "  `tenant_name`    VARCHAR(128)         NULL," +
-            "  `user_name`      VARCHAR(128)         NULL," +
-            "  `error_code`     INT                  NULL COMMENT 'Код ошибки при FAIL'," +
-            "  `ssl`            CHAR(1)              NULL COMMENT 'Y/N только для SERVER'," +
-            "  `client_type`    VARCHAR(16)          NULL COMMENT 'JDBC/JAVA/OCI/OBCLIENT/MYSQL_CLI'," +
-            "  `proxy_sessid`   BIGINT UNSIGNED      NULL COMMENT 'proxy_sessid'," +
-            "  `cs_id`          BIGINT UNSIGNED      NULL COMMENT 'Client session id (PROXY)'," +
-            "  `server_node_ip` VARCHAR(64)          NULL COMMENT 'IP OBServer-узла из тела строки лога'," +
-            "  `from_proxy`     TINYINT(1)           NULL COMMENT '1=пришёл через OBProxy (SERVER-лог)'," +
-            "  PRIMARY KEY (`id`)," +
-            "  UNIQUE KEY `uk_sess` (`source`, `server_ip`, `cluster_name`, `session_id`, `login_time`)," +
-            "  KEY `idx_login_time` (`login_time`)," +
-            "  KEY `idx_user`       (`user_name`)," +
-            "  KEY `idx_open`       (`logoff_time`)" +
-            ") COMMENT = 'OceanBase сессии: логин и логофф в одной строке'";
+                "CREATE TABLE `sessions` (" +
+                        "  `id`             BIGINT UNSIGNED  NOT NULL AUTO_INCREMENT," +
+                        "  `source`         VARCHAR(8)       NOT NULL COMMENT 'SERVER или PROXY'," +
+                        "  `server_ip`      VARCHAR(64)      NOT NULL DEFAULT '' COMMENT 'IP узла-источника лога (для UK)'," +
+                        "  `cluster_name`   VARCHAR(128)     NOT NULL DEFAULT '' COMMENT 'Имя кластера (PROXY) или пустая строка'," +
+                        "  `session_id`     BIGINT UNSIGNED  NOT NULL COMMENT 'sessid (SERVER) или server_sessid (PROXY)'," +
+                        "  `login_time`     DATETIME(6)      NOT NULL COMMENT 'Время логина из лога'," +
+                        "  `logoff_time`    DATETIME(6)          NULL COMMENT 'Время логоффа, NULL = сессия открыта'," +
+                        "  `is_success`     TINYINT(1)       NOT NULL COMMENT '1=LOGIN_OK 0=LOGIN_FAIL'," +
+                        "  `client_ip`      VARCHAR(64)          NULL COMMENT 'IP клиента'," +
+                        "  `tenant_name`    VARCHAR(128)         NULL," +
+                        "  `user_name`      VARCHAR(128)         NULL," +
+                        "  `error_code`     INT                  NULL COMMENT 'Код ошибки при FAIL'," +
+                        "  `ssl`            CHAR(1)              NULL COMMENT 'Y/N только для SERVER'," +
+                        "  `client_type`    VARCHAR(16)          NULL COMMENT 'JDBC/JAVA/OCI/OBCLIENT/MYSQL_CLI'," +
+                        "  `proxy_sessid`   BIGINT UNSIGNED      NULL COMMENT 'proxy_sessid'," +
+                        "  `cs_id`          BIGINT UNSIGNED      NULL COMMENT 'Client session id (PROXY)'," +
+                        "  `server_node_ip` VARCHAR(64)          NULL COMMENT 'IP OBServer-узла из тела строки лога'," +
+                        "  `from_proxy`     TINYINT(1)           NULL COMMENT '1=пришёл через OBProxy (SERVER-лог)'," +
+                        "  PRIMARY KEY (`id`)," +
+                        "  UNIQUE KEY `uk_sess` (`source`, `server_ip`, `cluster_name`, `session_id`, `login_time`)," +
+                        "  KEY `idx_login_time` (`login_time`)," +
+                        "  KEY `idx_user`       (`user_name`)," +
+                        "  KEY `idx_open`       (`logoff_time`)" +
+                        ") COMMENT = 'OceanBase сессии: логин и логофф в одной строке'";
         return new TableDef("sessions", ddl);
     }
 
@@ -137,23 +143,23 @@ public class DbInitializer {
      */
     private TableDef createLogFilesTableSql() {
         String ddl =
-            "CREATE TABLE `logfiles` (" +
-            "  `id`             BIGINT       NOT NULL AUTO_INCREMENT," +
-            "  `collector_id`   VARCHAR(128) NOT NULL COMMENT 'Идентификатор сервиса-коллектора (hostname или IP)'," +
-            "  `file_dir`       VARCHAR(512) NOT NULL COMMENT 'Директория лог-файла'," +
-            "  `file_name`      VARCHAR(256) NOT NULL COMMENT 'Имя файла'," +
-            "  `file_type`      VARCHAR(16)  NOT NULL COMMENT 'SERVER или PROXY'," +
-            "  `file_size`      BIGINT       NOT NULL DEFAULT 0 COMMENT 'Последний известный размер в байтах'," +
-            "  `last_line_num`  BIGINT       NOT NULL DEFAULT 0 COMMENT 'Байтовый offset после последней обработанной строки'," +
-            "  `last_timestamp` VARCHAR(32)      NULL COMMENT 'Временная метка последней обработанной записи'," +
-            "  `last_tid`       INT              NULL COMMENT 'Thread ID последней обработанной записи'," +
-            "  `last_trace_id`  VARCHAR(64)      NULL COMMENT 'Trace ID последней обработанной записи'," +
-            "  `file_ip`        VARCHAR(64)      NULL COMMENT 'IP узла-источника лога'," +
-            "  PRIMARY KEY (`id`)," +
-            "  UNIQUE KEY `uq_collector_dir_name` (`collector_id`, `file_dir`(255), `file_name`)," +
-            "  KEY `idx_file_type` (`file_type`)," +
-            "  KEY `idx_collector`  (`collector_id`)" +
-            ") COMMENT = 'Состояние обработки лог-файлов OceanBase'";
+                "CREATE TABLE `logfiles` (" +
+                        "  `id`             BIGINT       NOT NULL AUTO_INCREMENT," +
+                        "  `collector_id`   VARCHAR(128) NOT NULL COMMENT 'Идентификатор сервиса-коллектора (hostname или IP)'," +
+                        "  `file_dir`       VARCHAR(512) NOT NULL COMMENT 'Директория лог-файла'," +
+                        "  `file_name`      VARCHAR(256) NOT NULL COMMENT 'Имя файла'," +
+                        "  `file_type`      VARCHAR(16)  NOT NULL COMMENT 'SERVER или PROXY'," +
+                        "  `file_size`      BIGINT       NOT NULL DEFAULT 0 COMMENT 'Последний известный размер в байтах'," +
+                        "  `last_line_num`  BIGINT       NOT NULL DEFAULT 0 COMMENT 'Байтовый offset после последней обработанной строки'," +
+                        "  `last_timestamp` VARCHAR(32)      NULL COMMENT 'Временная метка последней обработанной записи'," +
+                        "  `last_tid`       INT              NULL COMMENT 'Thread ID последней обработанной записи'," +
+                        "  `last_trace_id`  VARCHAR(64)      NULL COMMENT 'Trace ID последней обработанной записи'," +
+                        "  `file_ip`        VARCHAR(64)      NULL COMMENT 'IP узла-источника лога'," +
+                        "  PRIMARY KEY (`id`)," +
+                        "  UNIQUE KEY `uq_collector_dir_name` (`collector_id`, `file_dir`(255), `file_name`)," +
+                        "  KEY `idx_file_type` (`file_type`)," +
+                        "  KEY `idx_collector`  (`collector_id`)" +
+                        ") COMMENT = 'Состояние обработки лог-файлов OceanBase'";
         return new TableDef("logfiles", ddl);
     }
 
@@ -166,7 +172,7 @@ public class DbInitializer {
                 "&sessionVariables=ob_query_timeout=10000000000" +
                 "&connectTimeout=5000" +
                 "&socketTimeout=30000";
-        System.out.println("[DbInitializer] Connecting to: jdbc:oceanbase://" + hostsPart + "/" + database);
+        debug("[DbInitializer] Connecting to: jdbc:oceanbase://" + hostsPart + "/" + database);
         return DriverManager.getConnection(url, config.user, config.password);
     }
 

@@ -1,6 +1,7 @@
 import db.DbInitializer;
 import db.SessionDao;
 import log.LogFileProcessor;
+import log.ObServerLineParser;
 import model.AppConfig;
 import model.AppConfigReader;
 import model.PasswordEnricher;
@@ -17,10 +18,9 @@ public class Main {
     private static final String DEFAULT_CONFIG = "config.xml";
 
     public static void main(String[] args) {
-        String configPath = args.length > 0 ? args[0] : DEFAULT_CONFIG;
+        long totalStart = System.currentTimeMillis();
 
-        System.out.println("=== OceanBase Auditor ===");
-        System.out.println("Config: " + configPath);
+        String configPath = args.length > 0 ? args[0] : DEFAULT_CONFIG;
 
         // 1. Читаем конфиг
         AppConfig config;
@@ -39,21 +39,38 @@ public class Main {
             return;
         }
 
-        // 2. Подставляем пароль
+        // Хелперы уровня — конфиг уже прочитан
+        final AppConfig.LogLevel lvl = config.logLevel;
+        final boolean isDebug = lvl == AppConfig.LogLevel.DEBUG;
+        final boolean isInfo  = lvl != AppConfig.LogLevel.ERROR;
+
+        if (isInfo) {
+            System.out.println("=== OceanBase Auditor ===");
+            System.out.println("Config: " + configPath);
+        }
+
+        // 2. Инициализируем список игнорируемых пользователей в парсере
+        ObServerLineParser.setIgnoredUsers(config.ignoredUsers);
+
+        // 3. Подставляем пароль
         PasswordEnricher.enrich(config.systemTenantConnection);
 
-        // 3. Печатаем конфиг
-        System.out.println("\n--- Loaded configuration ---");
-        System.out.println("CollectorId        : " + config.collectorId);
-        System.out.println("OBProxy log paths  : " + config.obProxyLogPaths);
-        System.out.println("OBServer log paths : " + config.obServerLogPaths);
-        System.out.println("DB connection      : " + config.systemTenantConnection);
-        System.out.println("JDBC URL           : " + config.systemTenantConnection.toJdbcUrl());
-        System.out.println("----------------------------\n");
+        // 4. Печатаем конфиг (только DEBUG)
+        if (isDebug) {
+            System.out.println("\n--- Loaded configuration ---");
+            System.out.println("CollectorId        : " + config.collectorId);
+            System.out.println("LogLevel           : " + config.logLevel);
+            System.out.println("IgnoredUsers       : " + config.ignoredUsers);
+            System.out.println("OBProxy log paths  : " + config.obProxyLogPaths);
+            System.out.println("OBServer log paths : " + config.obServerLogPaths);
+            System.out.println("DB connection      : " + config.systemTenantConnection);
+            System.out.println("JDBC URL           : " + config.systemTenantConnection.toJdbcUrl());
+            System.out.println("----------------------------\n");
+        }
 
-        // 4. Инициализация БД
+        // 5. Инициализация БД
         try {
-            DbInitializer initializer = new DbInitializer(config.systemTenantConnection);
+            DbInitializer initializer = new DbInitializer(config.systemTenantConnection, lvl);
             initializer.initialize();
         } catch (Exception e) {
             System.err.println("[Main] DB initialization failed: " + e.getMessage());
@@ -62,7 +79,7 @@ public class Main {
             return;
         }
 
-        // 5. Обработка логов + синхронизация
+        // 6. Обработка логов + синхронизация
         try {
             Connection conn = DriverManager.getConnection(
                     config.systemTenantConnection.toJdbcUrl("admintools"),
@@ -70,25 +87,26 @@ public class Main {
                     config.systemTenantConnection.password
             );
 
-            // 5a. Читаем все лог-файлы
-            LogFileProcessor processor = new LogFileProcessor(conn, config.collectorId);
+            LogFileProcessor processor = new LogFileProcessor(conn, config);
             processor.processServerDirs(config.obServerLogPaths);
             processor.processProxyDirs(config.obProxyLogPaths);
 
-            // 5b. Закрыть PROXY-строки для неудачных входов.
-            // PROXY видит соединение как успешное (is_success=1), не зная об ошибке OBServer.
-            // SERVER к этому моменту уже обработан — копируем logoff_time и error_code.
             SessionDao sessionDao = new SessionDao(conn);
             sessionDao.syncFailedProxySessions();
 
             conn.close();
+
+            long totalMs = System.currentTimeMillis() - totalStart;
+            System.out.printf("[Main] Done. Total time: %d ms | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d%n",
+                    totalMs,
+                    processor.getTotalLines(),
+                    processor.getTotalInserted(),
+                    processor.getTotalLogoff(),
+                    processor.getTotalLogoffMiss());
         } catch (Exception e) {
             System.err.println("[Main] Log processing failed: " + e.getMessage());
             e.printStackTrace();
             System.exit(1);
-            return;
         }
-
-        System.out.println("\n[Main] Done.");
     }
 }

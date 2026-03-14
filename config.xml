@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    OceanBase Auditor — конфигурация
+    ====================================
+
+    CollectorId — уникальный идентификатор этого экземпляра сервиса.
+                  Используется для разделения записей в таблице logfiles
+                  когда несколько сервисов читают локальные файлы на разных серверах.
+                  Если не указан или пустой — берётся hostname машины.
+                  Рекомендуется: IP-адрес сервера на котором запущен сервис.
+
+    LogLevel     — уровень логирования:
+                   DEBUG — подробный вывод всех шагов обработки
+                   INFO  — только итоговая строка по каждому изменившемуся файлу + общее время
+                   ERROR — только ошибки
+
+    IgnoredUsers — список служебных учётных записей, исключаемых из аудита.
+                   Если секция отсутствует — используются дефолты: ocp_monitor, proxy_ro, proxyro.
+
+    ObProxyLogPaths  — пути до директорий с логами OBProxy (obproxy.log*)
+                       Для UNC: \\server\share
+                       Несколько прокси — несколько <Path>
+
+    ObServerLogPaths — пути до директорий с логами OBServer (observer.log*)
+                       Несколько серверов — несколько <Path>
+
+    SystemTenantConnection — подключение к системному тенанту
+        Hosts    — список хостов в формате ip:port
+        User     — в формате user@tenant
+        Password — если пустой: берётся из переменной окружения
+                     OB_<USER>_PASSWORD или OB_PASSWORD или запрашивается интерактивно
+        Database — схема (oceanbase для системного тенанта)
+-->
+<AppConfig>
+
+    <!-- Идентификатор этого экземпляра сервиса (если пусто — берётся hostname) -->
+    <CollectorId></CollectorId>
+
+    <!-- Уровень логирования: DEBUG | INFO | ERROR -->
+    <LogLevel>ERROR</LogLevel>
+
+    <!-- Служебные УЗ, исключаемые из аудита (соединения этих пользователей не записываются) -->
+    <IgnoredUsers>
+        <User>ocp_monitor</User>
+        <User>proxy_ro</User>
+        <User>proxyro</User>
+    </IgnoredUsers>
+
+    <!-- Пути до логов OBProxy -->
+    <ObProxyLogPaths>
+        <Path>\\192.168.55.200\obproxy_log</Path>
+        <!-- <Path>\\192.168.55.201\obproxy_log</Path> -->
+    </ObProxyLogPaths>
+
+    <!-- Пути до логов OBServer -->
+    <ObServerLogPaths>
+        <Path>\\192.168.55.205\oceanbase_log</Path>
+        <!-- <Path>\\192.168.55.206\oceanbase_log</Path> -->
+        <!-- <Path>\\192.168.55.207\oceanbase_log</Path> -->
+    </ObServerLogPaths>
+
+    <!-- Подключение к системному тенанту -->
+    <SystemTenantConnection>
+        <Hosts>
+            <Host>192.168.55.205:2881</Host>
+            <!-- <Host>192.168.55.206:2881</Host> -->
+        </Hosts>
+        <User>ob_cluster_admin@sys</User>
+        <!-- Password: оставить пустым → возьмём из env OB_TA_PASSWORD или OB_PASSWORD -->
+        <Password>qaz123</Password>
+        <Database>oceanbase</Database>
+    </SystemTenantConnection>
+
+</AppConfig>

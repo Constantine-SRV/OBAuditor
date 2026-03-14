@@ -2,6 +2,10 @@ package log;
 
 import model.LoginEvent;
 
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -18,6 +22,24 @@ import java.util.regex.Pattern;
  *    connection close(sessid=..., proxy_sessid=..., tenant_id=..., from_proxy=...)
  */
 public class ObServerLineParser {
+
+    /**
+     * Служебные пользователи, соединения которых не аудируются.
+     * Инициализируется из конфига через setIgnoredUsers() при старте.
+     * Дефолт на случай если setIgnoredUsers() не был вызван.
+     */
+    private static volatile Set<String> ignoredUsers =
+            new HashSet<>(Arrays.asList("ocp_monitor", "proxy_ro", "proxyro"));
+
+    /**
+     * Задаёт список игнорируемых пользователей из конфигурации.
+     * Вызывается один раз при старте приложения (из Main).
+     */
+    public static void setIgnoredUsers(Collection<String> users) {
+        ignoredUsers = new HashSet<>(users);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
 
     private static final Pattern P_TIMESTAMP = Pattern.compile(
             "^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d+)\\]");
@@ -64,8 +86,8 @@ public class ObServerLineParser {
         String userName       = extractStr(P_USER, line);
         String directClientIp = extractDirectClientIp(line);
 
-        // Служебные пользователи — всегда исключаем
-        if ("ocp_monitor".equals(userName) || "proxy_ro".equals(userName) || "proxyro".equals(userName)) return null;
+        // Служебные пользователи — исключаем (список из конфига)
+        if (ignoredUsers.contains(userName)) return null;
 
         // Loopback = внутренние соединения OBAgent и подобных.
         // Раскомментировать если шум от локальных подключений станет проблемой.

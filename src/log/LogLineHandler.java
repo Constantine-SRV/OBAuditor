@@ -1,6 +1,7 @@
 package log;
 
 import db.SessionDao;
+import model.AppConfig;
 import model.LoginEvent;
 
 import java.sql.Connection;
@@ -27,32 +28,39 @@ import java.util.Set;
  */
 public class LogLineHandler {
 
-    private final String     fileType;
-    private final String     fileName;
-    private       String     serverIp;
-    private final SessionDao sessionDao;
-    private final Set<Long>  openSessions;  // proxy_sessid открытых сессий
+    private final String              fileType;
+    private final String              fileName;
+    private       String              serverIp;
+    private final SessionDao          sessionDao;
+    private final Set<Long>           openSessions;  // proxy_sessid открытых сессий
+    private final AppConfig.LogLevel  logLevel;
 
-    private long processedCount = 0;
-    private long skippedCount   = 0;
-    private long eventCount     = 0;
-    private long insertedCount  = 0;
-    private long logoffCount    = 0;
-    private long logoffMissCount= 0; // логоффы для сессий не найденных в set (fallback)
+    private long processedCount  = 0;
+    private long skippedCount    = 0;
+    private long eventCount      = 0;
+    private long insertedCount   = 0;
+    private long logoffCount     = 0;
+    private long logoffMissCount = 0; // логоффы для сессий не найденных в set (fallback)
 
     private final ObProxyLineParser proxyParser = new ObProxyLineParser();
 
     public LogLineHandler(String fileType, String fileName, String serverIp,
-                          Connection conn, Set<Long> openSessions) {
+                          Connection conn, Set<Long> openSessions, AppConfig.LogLevel logLevel) {
         this.fileType     = fileType;
         this.fileName     = fileName;
         this.serverIp     = serverIp != null ? serverIp : "";
         this.sessionDao   = new SessionDao(conn);
         this.openSessions = openSessions;
+        this.logLevel     = logLevel != null ? logLevel : AppConfig.LogLevel.INFO;
     }
 
     public void setServerIp(String ip) {
         if (ip != null && !ip.isEmpty()) this.serverIp = ip;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    private void debug(String fmt, Object... args) {
+        if (logLevel == AppConfig.LogLevel.DEBUG) System.out.printf(fmt, args);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -99,32 +107,28 @@ public class LogLineHandler {
 
     // ─────────────────────────────────────────────────────────────────
     private void handleLogoff(LoginEvent event) {
-        // Определяем proxy_sessid: SERVER использует proxySessid, PROXY — proxySessionId
         Long proxySessid = event.proxySessid != null ? event.proxySessid : event.proxySessionId;
 
         if (proxySessid == null) {
-            // Нет proxy_sessid — не можем закрыть (прямое подключение без прокси, proc_ret=0)
-            System.out.printf("[LogLineHandler] LOGOFF skipped (no proxy_sessid): %s%n", event);
+            debug("[LogLineHandler] LOGOFF skipped (no proxy_sessid): %s%n", event);
             return;
         }
 
         boolean inSet = openSessions.remove(proxySessid);
         if (!inSet) {
-            // Сессия открылась до начала этого файла (или до первого запуска сервиса)
             logoffMissCount++;
-            System.out.printf("[LogLineHandler] LOGOFF fallback (not in set) proxy_sessid=%s%n",
+            debug("[LogLineHandler] LOGOFF fallback (not in set) proxy_sessid=%s%n",
                     Long.toUnsignedString(proxySessid));
         }
 
-        // В обоих случаях пробуем UPDATE — для сессий не в Set это fallback
         try {
             int updated = sessionDao.updateLogoff(proxySessid, event.eventTime);
             if (updated > 0) {
                 logoffCount++;
-                System.out.printf("[LogLineHandler] LOGOFF closed %d row(s) proxy_sessid=%s at %s%n",
+                debug("[LogLineHandler] LOGOFF closed %d row(s) proxy_sessid=%s at %s%n",
                         updated, Long.toUnsignedString(proxySessid), event.eventTime);
             } else {
-                System.out.printf("[LogLineHandler] LOGOFF no rows updated proxy_sessid=%s%n",
+                debug("[LogLineHandler] LOGOFF no rows updated proxy_sessid=%s%n",
                         Long.toUnsignedString(proxySessid));
             }
         } catch (SQLException ex) {

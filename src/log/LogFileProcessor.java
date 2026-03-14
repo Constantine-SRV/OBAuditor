@@ -2,6 +2,7 @@ package log;
 
 import db.LogFileDao;
 import db.SessionDao;
+import model.AppConfig;
 import model.LogFileRecord;
 
 import java.io.*;
@@ -53,16 +54,52 @@ public class LogFileProcessor {
 
     private static final long STALE_MINUTES = 10;
 
-    private final Connection  conn;
-    private final LogFileDao  dao;
-    private final SessionDao  sessionDao;
-    private final String      collectorId;
+    private final Connection        conn;
+    private final LogFileDao        dao;
+    private final SessionDao        sessionDao;
+    private final String            collectorId;
+    private final AppConfig.LogLevel logLevel;
 
-    public LogFileProcessor(Connection conn, String collectorId) {
+    // Суммарные счётчики по всем обработанным файлам
+    private long totalInserted   = 0;
+    private long totalLogoff     = 0;
+    private long totalLogoffMiss = 0;
+    private long totalLines      = 0;
+
+    // ─────────────────────────────────────────────────────────────────
+    public LogFileProcessor(Connection conn, AppConfig config) {
         this.conn        = conn;
         this.dao         = new LogFileDao(conn);
         this.sessionDao  = new SessionDao(conn);
-        this.collectorId = collectorId;
+        this.collectorId = config.collectorId;
+        this.logLevel    = config.logLevel;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    //  Logging helpers
+    // ─────────────────────────────────────────────────────────────────
+
+    /** DEBUG: только при LogLevel.DEBUG */
+    private void debug(String msg) {
+        if (logLevel == AppConfig.LogLevel.DEBUG) System.out.println(msg);
+    }
+
+    private void debugf(String fmt, Object... args) {
+        if (logLevel == AppConfig.LogLevel.DEBUG) System.out.printf(fmt, args);
+    }
+
+    /** INFO: при DEBUG и INFO */
+    private void info(String msg) {
+        if (logLevel != AppConfig.LogLevel.ERROR) System.out.println(msg);
+    }
+
+    private void infof(String fmt, Object... args) {
+        if (logLevel != AppConfig.LogLevel.ERROR) System.out.printf(fmt, args);
+    }
+
+    /** ERROR: всегда в stderr */
+    private void error(String msg) {
+        System.err.println(msg);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -81,10 +118,10 @@ public class LogFileProcessor {
                                   String[] namePrefixes) throws Exception {
         File dir = new File(dirPath);
         if (!dir.exists() || !dir.isDirectory()) {
-            System.err.println("[LogFileProcessor] Directory not found: " + dirPath);
+            error("[LogFileProcessor] Directory not found: " + dirPath);
             return;
         }
-        System.out.println("[LogFileProcessor] Processing dir: " + dirPath
+        debug("[LogFileProcessor] Processing dir: " + dirPath
                 + " type=" + fileType + " collector=" + collectorId);
 
         Map<String, LogFileRecord> knownFiles = dao.loadByDir(collectorId, dirPath);
@@ -97,7 +134,7 @@ public class LogFileProcessor {
         });
 
         if (files == null || files.length == 0) {
-            System.out.println("[LogFileProcessor] No log files found in: " + dirPath);
+            debug("[LogFileProcessor] No log files found in: " + dirPath);
             return;
         }
 
@@ -138,7 +175,7 @@ public class LogFileProcessor {
         long startOffset = record.lastLineNum;
 
         if (isActive && !isNew && shouldResetToStart(record, currentSize)) {
-            System.out.printf("[LogFileProcessor] Rotation detected for %s — reading from start%n", fileName);
+            infof("[LogFileProcessor] Rotation detected for %s — reading from start%n", fileName);
             startOffset          = 0;
             record.lastLineNum   = 0;
             record.lastTimestamp = null;
@@ -147,12 +184,13 @@ public class LogFileProcessor {
         }
 
         if (!isNew && currentSize == record.fileSize && startOffset >= currentSize) {
-            System.out.printf("[LogFileProcessor] %s — no changes (size=%d), skipping%n",
+            // Файл не изменился — при INFO и ERROR ничего не печатаем
+            debugf("[LogFileProcessor] %s — no changes (size=%d), skipping%n",
                     fileName, currentSize);
             return;
         }
 
-        System.out.printf("[LogFileProcessor] Processing %s (size=%d, offset=%d)%n",
+        debugf("[LogFileProcessor] Processing %s (size=%d, offset=%d)%n",
                 fileName, currentSize, startOffset);
 
         // ── IP узла ──────────────────────────────────────────────────
@@ -161,38 +199,47 @@ public class LogFileProcessor {
             serverIp      = readServerIpFromFirstLine(file);
             record.fileIp = serverIp;
         }
-        System.out.printf("[LogFileProcessor] %s — file_ip=%s%n", fileName,
+        debugf("[LogFileProcessor] %s — file_ip=%s%n", fileName,
                 serverIp.isEmpty() ? "(searching in log...)" : serverIp);
 
         // ── Загружаем открытые сессии из БД ──────────────────────────
-        // Фильтр по serverIp держит Set компактным.
-        // Если serverIp ещё не известен (PROXY, первый запуск) — грузим пустой Set,
-        // они заполнятся из LOGIN_OK событий текущего файла.
         Set<Long> openSessions = loadOpenSessions(serverIp);
-        System.out.printf("[LogFileProcessor] %s — loaded %d open sessions%n",
+        debugf("[LogFileProcessor] %s — loaded %d open sessions%n",
                 fileName, openSessions.size());
 
         // ── Читаем и обрабатываем ─────────────────────────────────────
+        long t0 = System.currentTimeMillis();
+
         LogLineHandler handler = new LogLineHandler(
-                fileType, fileName, serverIp, conn, openSessions);
+                fileType, fileName, serverIp, conn, openSessions, logLevel);
         readAndProcess(file, startOffset, record, handler, isNew);
 
+        long elapsedMs = System.currentTimeMillis() - t0;
         record.fileSize = currentSize;
+
         if (isNew) {
             dao.insert(record);
-            System.out.printf("[LogFileProcessor] %s — inserted new record id=%d%n",
+            debugf("[LogFileProcessor] %s — inserted new record id=%d%n",
                     fileName, record.id);
         } else {
             dao.update(record);
         }
 
-        System.out.printf(
-                "[LogFileProcessor] %s — done. processed=%d events=%d " +
-                        "inserted=%d logoff=%d logoffMiss=%d offset=%d ip=%s%n",
+        // Итоговая строка — печатается при DEBUG и INFO (если файл изменился, а он изменился — мы здесь)
+        infof("[LogFileProcessor] %s — done. lines=%d events=%d " +
+                        "inserted=%d logoff=%d logoffMiss=%d offset=%d ip=%s time=%dms%n",
                 fileName,
                 handler.getProcessedCount(), handler.getEventCount(),
                 handler.getInsertedCount(), handler.getLogoffCount(),
-                handler.getLogoffMissCount(), record.lastLineNum, record.fileIp);
+                handler.getLogoffMissCount(), record.lastLineNum,
+                record.fileIp != null ? record.fileIp : "",
+                elapsedMs);
+
+        // Накапливаем глобальные счётчики
+        totalInserted   += handler.getInsertedCount();
+        totalLogoff     += handler.getLogoffCount();
+        totalLogoffMiss += handler.getLogoffMissCount();
+        totalLines      += handler.getProcessedCount();
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -201,7 +248,7 @@ public class LogFileProcessor {
         try {
             return sessionDao.loadOpenProxySessids(serverIp);
         } catch (SQLException ex) {
-            System.err.println("[LogFileProcessor] Failed to load open sessions: " + ex.getMessage());
+            error("[LogFileProcessor] Failed to load open sessions: " + ex.getMessage());
             return new HashSet<>();
         }
     }
@@ -230,12 +277,12 @@ public class LogFileProcessor {
                     if (m.find()) {
                         record.fileIp = m.group(1);
                         needProxyIp   = false;
-                        System.out.printf("[LogFileProcessor] %s — found proxy ip: %s%n",
+                        debugf("[LogFileProcessor] %s — found proxy ip: %s%n",
                                 record.fileName, record.fileIp);
                         if (!isNew && record.id > 0) {
                             try { dao.updateFileIp(record); }
                             catch (Exception e) {
-                                System.err.println("[LogFileProcessor] updateFileIp failed: " + e.getMessage());
+                                error("[LogFileProcessor] updateFileIp failed: " + e.getMessage());
                             }
                         }
                         handler.setServerIp(record.fileIp);
@@ -258,7 +305,7 @@ public class LogFileProcessor {
             Matcher m = P_SERVER_FIRST_LINE_IP.matcher(firstLine);
             if (m.find()) return m.group(1);
         } catch (IOException e) {
-            System.err.println("[LogFileProcessor] Cannot read first line of "
+            error("[LogFileProcessor] Cannot read first line of "
                     + file.getName() + ": " + e.getMessage());
         }
         return "";
@@ -283,13 +330,12 @@ public class LogFileProcessor {
                 LocalDateTime lastTs = LocalDateTime.parse(record.lastTimestamp, LOG_TS_FMT);
                 long minutesAgo = ChronoUnit.MINUTES.between(lastTs, LocalDateTime.now());
                 if (minutesAgo > STALE_MINUTES) {
-                    System.out.printf("[LogFileProcessor] Last timestamp %s is %d min ago — resetting%n",
+                    debugf("[LogFileProcessor] Last timestamp %s is %d min ago — resetting%n",
                             record.lastTimestamp, minutesAgo);
                     return true;
                 }
             } catch (Exception e) {
-                System.err.println("[LogFileProcessor] Cannot parse lastTimestamp: "
-                        + record.lastTimestamp);
+                error("[LogFileProcessor] Cannot parse lastTimestamp: " + record.lastTimestamp);
             }
         }
         return false;
@@ -298,4 +344,12 @@ public class LogFileProcessor {
     private boolean isActiveLog(String fileName, String activeName) {
         return fileName.equals(activeName);
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    //  Суммарные счётчики по всем файлам
+    // ─────────────────────────────────────────────────────────────────
+    public long getTotalInserted()   { return totalInserted; }
+    public long getTotalLogoff()     { return totalLogoff; }
+    public long getTotalLogoffMiss() { return totalLogoffMiss; }
+    public long getTotalLines()      { return totalLines; }
 }

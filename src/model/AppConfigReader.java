@@ -6,6 +6,7 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.File;
 import java.net.InetAddress;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -37,16 +38,33 @@ public class AppConfigReader {
         String collectorId = getText(doc.getDocumentElement(), "CollectorId");
         if (collectorId == null || collectorId.isEmpty()) {
             collectorId = resolveHostname();
-            System.out.println("[AppConfigReader] CollectorId not set in config, using hostname: " + collectorId);
-        } else {
-            System.out.println("[AppConfigReader] CollectorId: " + collectorId);
         }
         cfg.collectorId = collectorId;
 
         cfg.obProxyLogPaths        = readStringList(doc, "ObProxyLogPaths",  "Path");
         cfg.obServerLogPaths       = readStringList(doc, "ObServerLogPaths", "Path");
         cfg.systemTenantConnection = readConnectionConfig(doc, "SystemTenantConnection");
+
+        // LogLevel: DEBUG / INFO / ERROR, по умолчанию INFO
+        String logLevelStr = getText(doc.getDocumentElement(), "LogLevel");
+        cfg.logLevel = parseLogLevel(logLevelStr);
+
+        List<String> ignoredUsers = readStringList(doc, "IgnoredUsers", "User");
+        if (!ignoredUsers.isEmpty()) {
+            cfg.ignoredUsers = ignoredUsers;
+        }
+
         return cfg;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    private static AppConfig.LogLevel parseLogLevel(String s) {
+        if (s == null || s.isEmpty()) return AppConfig.LogLevel.INFO;
+        switch (s.trim().toUpperCase()) {
+            case "DEBUG": return AppConfig.LogLevel.DEBUG;
+            case "ERROR": return AppConfig.LogLevel.ERROR;
+            default:      return AppConfig.LogLevel.INFO;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
