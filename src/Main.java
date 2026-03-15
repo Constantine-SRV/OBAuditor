@@ -1,3 +1,5 @@
+import db.CleanupDao;
+import db.DdlDclAuditDao;
 import db.DbInitializer;
 import db.SessionDao;
 import log.LogFileProcessor;
@@ -8,6 +10,7 @@ import model.PasswordEnricher;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.time.LocalDateTime;
 
 /**
  * OceanBase Auditor — точка входа.
@@ -39,10 +42,9 @@ public class Main {
             return;
         }
 
-        // Хелперы уровня — конфиг уже прочитан
-        final AppConfig.LogLevel lvl = config.logLevel;
-        final boolean isDebug = lvl == AppConfig.LogLevel.DEBUG;
-        final boolean isInfo  = lvl != AppConfig.LogLevel.ERROR;
+        final AppConfig.LogLevel lvl    = config.logLevel;
+        final boolean            isDebug = lvl == AppConfig.LogLevel.DEBUG;
+        final boolean            isInfo  = lvl != AppConfig.LogLevel.ERROR;
 
         if (isInfo) {
             System.out.println("=== OceanBase Auditor ===");
@@ -61,6 +63,10 @@ public class Main {
             System.out.println("CollectorId        : " + config.collectorId);
             System.out.println("LogLevel           : " + config.logLevel);
             System.out.println("IgnoredUsers       : " + config.ignoredUsers);
+            System.out.println("DdlDclAuditMode    : " + config.ddlDclAuditMode);
+            System.out.println("CleanupMinute      : " + config.cleanupMinute);
+            System.out.println("MaxDdlDclAuditRows : " + config.maxDdlDclAuditRows);
+            System.out.println("MaxSessionsRows    : " + config.maxSessionsRows);
             System.out.println("OBProxy log paths  : " + config.obProxyLogPaths);
             System.out.println("OBServer log paths : " + config.obServerLogPaths);
             System.out.println("DB connection      : " + config.systemTenantConnection);
@@ -79,32 +85,73 @@ public class Main {
             return;
         }
 
-        // 6. Обработка логов + синхронизация
+        // 6. Основная обработка
         try {
             Connection conn = DriverManager.getConnection(
                     config.systemTenantConnection.toJdbcUrl("admintools"),
                     config.systemTenantConnection.user,
                     config.systemTenantConnection.password
             );
+            conn.setAutoCommit(false);
 
+            // 6a. Обработка лог-файлов (логины/логоффы)
             LogFileProcessor processor = new LogFileProcessor(conn, config);
             processor.processServerDirs(config.obServerLogPaths);
             processor.processProxyDirs(config.obProxyLogPaths);
 
+            // 6b. Reconciliation PROXY-строк для неудачных логинов
             SessionDao sessionDao = new SessionDao(conn);
             sessionDao.syncFailedProxySessions();
 
+            // 6c. DDL/DCL аудит из GV$OB_SQL_AUDIT
+            int ddlDclInserted = 0;
+            if (config.ddlDclAuditMode > 0) {
+                DdlDclAuditDao auditDao = new DdlDclAuditDao(conn, lvl);
+                boolean doCollect = false;
+
+                if (config.ddlDclAuditMode == 1) {
+                    // Основной коллектор — всегда собираем
+                    doCollect = true;
+                } else if (config.ddlDclAuditMode == 2) {
+                    // Резервный — только если основной не работает более 2 минут
+                    doCollect = auditDao.shouldCollectFallback();
+                }
+
+                if (doCollect) {
+                    ddlDclInserted = auditDao.collect();
+                }
+            }
+
+            // 6d. Очистка таблиц по расписанию
+            int cleanedDdlDcl = 0, cleanedSessions = 0;
+            if (config.cleanupMinute >= 0) {
+                int currentMinute = LocalDateTime.now().getMinute();
+                if (currentMinute == config.cleanupMinute) {
+                    if (isInfo) System.out.println("[Main] Running scheduled cleanup (minute=" + currentMinute + ")");
+                    CleanupDao cleanupDao = new CleanupDao(conn, lvl);
+                    cleanedDdlDcl   = cleanupDao.cleanDdlDclAuditLog(config.maxDdlDclAuditRows);
+                    cleanedSessions = cleanupDao.cleanSessions(config.maxSessionsRows);
+                }
+            }
+
+            conn.commit();
             conn.close();
 
             long totalMs = System.currentTimeMillis() - totalStart;
-            System.out.printf("[Main] Done. Total time: %d ms | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d%n",
-                    totalMs,
-                    processor.getTotalLines(),
-                    processor.getTotalInserted(),
-                    processor.getTotalLogoff(),
-                    processor.getTotalLogoffMiss());
+            System.out.printf(
+                "[Main] Done. Total time: %d ms | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d" +
+                " | ddlDcl: %d | cleanedDdlDcl: %d | cleanedSessions: %d%n",
+                totalMs,
+                processor.getTotalLines(),
+                processor.getTotalInserted(),
+                processor.getTotalLogoff(),
+                processor.getTotalLogoffMiss(),
+                ddlDclInserted,
+                cleanedDdlDcl,
+                cleanedSessions);
+
         } catch (Exception e) {
-            System.err.println("[Main] Log processing failed: " + e.getMessage());
+            System.err.println("[Main] Processing failed: " + e.getMessage());
             e.printStackTrace();
             System.exit(1);
         }

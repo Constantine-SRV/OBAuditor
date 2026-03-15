@@ -17,6 +17,38 @@ public class AppConfig {
     public enum LogLevel { DEBUG, INFO, ERROR }
 
     /**
+     * Режим сбора DDL/DCL аудита из GV$OB_SQL_AUDIT.
+     * 0 — отключён
+     * 1 — основной коллектор: собирает всегда
+     * 2 — резервный коллектор: собирает только если основной не обновлял audit_collector_state
+     *     более 2 минут (защита на случай падения основного)
+     */
+    public int ddlDclAuditMode = 0;
+
+    /**
+     * Минута часа (0–59) при которой запускается удаление устаревших строк.
+     * -1 — удаление отключено.
+     * Пример: 0 → удаление в XX:00, 20 → в XX:20, 40 → в XX:40.
+     * Запуская несколько коллекторов с разными значениями (0, 20, 40)
+     * можно гарантировать удаление минимум раз в час.
+     */
+    public int cleanupMinute = -1;
+
+    /**
+     * Максимальное количество строк в таблице ddl_dcl_audit_log.
+     * При превышении удаляются строки с наименьшим id.
+     * 0 — без ограничения.
+     */
+    public long maxDdlDclAuditRows = 500000;
+
+    /**
+     * Максимальное количество строк в таблице sessions.
+     * При превышении удаляются строки с наименьшим id.
+     * 0 — без ограничения.
+     */
+    public long maxSessionsRows = 500000;
+
+    /**
      * Уникальный идентификатор этого экземпляра сервиса.
      * Используется в таблице logfiles для разделения записей между сервисами
      * которые читают локальные файлы на разных серверах (одинаковые пути).
@@ -33,9 +65,7 @@ public class AppConfig {
     /** Параметры подключения к системному тенанту */
     public ConnectionConfig systemTenantConnection;
 
-    /**
-     * Уровень логирования. По умолчанию INFO.
-     */
+    /** Уровень логирования. По умолчанию INFO. */
     public LogLevel logLevel = LogLevel.INFO;
 
     /**
@@ -52,6 +82,10 @@ public class AppConfig {
                 "  obServerLogPaths=" + obServerLogPaths + "\n" +
                 "  logLevel=" + logLevel + "\n" +
                 "  ignoredUsers=" + ignoredUsers + "\n" +
+                "  ddlDclAuditMode=" + ddlDclAuditMode + "\n" +
+                "  cleanupMinute=" + cleanupMinute + "\n" +
+                "  maxDdlDclAuditRows=" + maxDdlDclAuditRows + "\n" +
+                "  maxSessionsRows=" + maxSessionsRows + "\n" +
                 "  systemTenantConnection=" + systemTenantConnection + "\n" +
                 "}";
     }

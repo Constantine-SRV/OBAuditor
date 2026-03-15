@@ -34,6 +34,9 @@ public class DbInitializer {
         try (Connection conn = openConnection(TARGET_DB)) {
             ensureTable(conn, createSessionsTableSql());
             ensureTable(conn, createLogFilesTableSql());
+            ensureTable(conn, createAuditCollectorStateTableSql());
+            ensureAuditCollectorStateRow(conn);
+            ensureTable(conn, createDdlDclAuditLogTableSql());
         }
 
         debug("[DbInitializer] Initialization complete.");
@@ -161,6 +164,59 @@ public class DbInitializer {
                         "  KEY `idx_collector`  (`collector_id`)" +
                         ") COMMENT = 'Состояние обработки лог-файлов OceanBase'";
         return new TableDef("logfiles", ddl);
+    }
+
+    private void ensureAuditCollectorStateRow(Connection conn) throws SQLException {
+        String sql = "INSERT IGNORE INTO `audit_collector_state` (id, collector_id, last_request_time) VALUES (1, 'ddl_dcl_audit', 0)";
+        try (Statement st = conn.createStatement()) {
+            int rows = st.executeUpdate(sql);
+            if (rows > 0) info("[DbInitializer] Inserted initial row into audit_collector_state");
+            else debug("[DbInitializer] audit_collector_state row already exists");
+        }
+    }
+
+    private TableDef createAuditCollectorStateTableSql() {
+        String ddl =
+            "CREATE TABLE `audit_collector_state` (" +
+            "  `id`                BIGINT       NOT NULL," +
+            "  `collector_id`      VARCHAR(64)  NOT NULL COMMENT 'Идентификатор коллектора'," +
+            "  `last_request_time` BIGINT       NOT NULL DEFAULT 0 COMMENT 'request_time последней обработанной записи GV$OB_SQL_AUDIT'," +
+            "  `updated_at`        DATETIME(6)      NULL COMMENT 'Wall-clock время последнего успешного сбора'," +
+            "  PRIMARY KEY (`id`)" +
+            ") COMMENT = 'Состояние DDL/DCL коллектора'";
+        return new TableDef("audit_collector_state", ddl);
+    }
+
+    private TableDef createDdlDclAuditLogTableSql() {
+        String ddl =
+            "CREATE TABLE `ddl_dcl_audit_log` (" +
+            "  `id`             BIGINT      NOT NULL AUTO_INCREMENT," +
+            "  `collected_at`   DATETIME(6) NOT NULL DEFAULT NOW(6) COMMENT 'Время вставки записи'," +
+            "  `request_id`     BIGINT      NOT NULL                COMMENT 'Request ID в OB (ключ дедупликации)'," +
+            "  `svr_ip`         VARCHAR(46) NOT NULL                COMMENT 'IP OBServer-узла'," +
+            "  `tenant_id`      BIGINT          NULL COMMENT 'ID тенанта'," +
+            "  `tenant_name`    VARCHAR(64)     NULL COMMENT 'Имя тенанта'," +
+            "  `user_id`        BIGINT          NULL COMMENT 'ID пользователя'," +
+            "  `user_name`      VARCHAR(64)     NULL COMMENT 'Имя пользователя'," +
+            "  `proxy_user`     VARCHAR(128)    NULL COMMENT 'Proxy-пользователь (при proxy-логине)'," +
+            "  `client_ip`      VARCHAR(46)     NULL COMMENT 'IP OBProxy или клиента при прямом подключении'," +
+            "  `user_client_ip` VARCHAR(46)     NULL COMMENT 'Реальный IP клиента'," +
+            "  `sid`            BIGINT UNSIGNED NULL COMMENT 'Session ID'," +
+            "  `db_name`        VARCHAR(128)    NULL COMMENT 'Контекст базы данных'," +
+            "  `stmt_type`      VARCHAR(128)    NULL COMMENT 'Тип SQL-оператора'," +
+            "  `query_sql`      LONGTEXT        NULL COMMENT 'Текст SQL'," +
+            "  `ret_code`       BIGINT          NULL COMMENT '0=успех, иное=код ошибки OB'," +
+            "  `affected_rows`  BIGINT          NULL COMMENT 'Затронуто строк'," +
+            "  `request_ts`     DATETIME(6) NOT NULL COMMENT 'Время начала выполнения'," +
+            "  `elapsed_time`   BIGINT          NULL COMMENT 'Время выполнения, микросекунды'," +
+            "  `retry_cnt`      BIGINT          NULL COMMENT 'Количество повторов'," +
+            "  PRIMARY KEY (`id`)," +
+            "  UNIQUE KEY `uq_req` (`svr_ip`, `request_id`)," +
+            "  KEY `idx_request_ts` (`request_ts`)," +
+            "  KEY `idx_user_name`  (`user_name`)," +
+            "  KEY `idx_stmt_type`  (`stmt_type`)" +
+            ") COMMENT = 'DDL/DCL аудит из GV$OB_SQL_AUDIT'";
+        return new TableDef("ddl_dcl_audit_log", ddl);
     }
 
     // ─────────────────────────────────────────────────────────────────

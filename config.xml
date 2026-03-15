@@ -4,47 +4,63 @@
     ====================================
 
     CollectorId — уникальный идентификатор этого экземпляра сервиса.
-                  Используется для разделения записей в таблице logfiles
-                  когда несколько сервисов читают локальные файлы на разных серверах.
                   Если не указан или пустой — берётся hostname машины.
-                  Рекомендуется: IP-адрес сервера на котором запущен сервис.
 
-    LogLevel     — уровень логирования:
-                   DEBUG — подробный вывод всех шагов обработки
-                   INFO  — только итоговая строка по каждому изменившемуся файлу + общее время
-                   ERROR — только ошибки
+    LogLevel     — уровень логирования: DEBUG | INFO | ERROR
 
-    IgnoredUsers — список служебных учётных записей, исключаемых из аудита.
-                   Если секция отсутствует — используются дефолты: ocp_monitor, proxy_ro, proxyro.
+    IgnoredUsers — служебные УЗ, исключаемые из аудита логинов.
+                   Дефолт: ocp_monitor, proxy_ro, proxyro.
+
+    DdlDclAuditMode — режим сбора DDL/DCL аудита из GV$OB_SQL_AUDIT:
+                   0 — отключён
+                   1 — основной коллектор (собирает всегда)
+                   2 — резервный коллектор (собирает только если основной
+                       не обновлял audit_collector_state более 2 минут)
+                   Рекомендация: на одном узле ставить 1, на остальных 2.
+
+    Cleanup      — управление размером таблиц:
+        CleanupMinute      — минута часа (0–59) когда запускается удаление.
+                             -1 = отключено.
+                             Пример: узел 1 = 0, узел 2 = 20, узел 3 = 40
+                             → гарантированное удаление раз в час.
+        MaxDdlDclAuditRows — макс. строк в ddl_dcl_audit_log (0 = без лимита)
+        MaxSessionsRows    — макс. строк в sessions (0 = без лимита)
 
     ObProxyLogPaths  — пути до директорий с логами OBProxy (obproxy.log*)
-                       Для UNC: \\server\share
-                       Несколько прокси — несколько <Path>
-
     ObServerLogPaths — пути до директорий с логами OBServer (observer.log*)
-                       Несколько серверов — несколько <Path>
 
     SystemTenantConnection — подключение к системному тенанту
-        Hosts    — список хостов в формате ip:port
-        User     — в формате user@tenant
-        Password — если пустой: берётся из переменной окружения
-                     OB_<USER>_PASSWORD или OB_PASSWORD или запрашивается интерактивно
-        Database — схема (oceanbase для системного тенанта)
 -->
 <AppConfig>
 
-    <!-- Идентификатор этого экземпляра сервиса (если пусто — берётся hostname) -->
+    <!-- Идентификатор экземпляра сервиса (если пусто — берётся hostname) -->
     <CollectorId></CollectorId>
 
     <!-- Уровень логирования: DEBUG | INFO | ERROR -->
     <LogLevel>ERROR</LogLevel>
 
-    <!-- Служебные УЗ, исключаемые из аудита (соединения этих пользователей не записываются) -->
+    <!-- Служебные УЗ, исключаемые из аудита логинов -->
     <IgnoredUsers>
         <User>ocp_monitor</User>
         <User>proxy_ro</User>
         <User>proxyro</User>
     </IgnoredUsers>
+
+    <!--
+        DDL/DCL аудит из GV$OB_SQL_AUDIT
+        0 = отключён | 1 = основной коллектор | 2 = резервный
+    -->
+    <DdlDclAuditMode>1</DdlDclAuditMode>
+
+    <!-- Управление размером таблиц -->
+    <Cleanup>
+        <!-- Минута часа для запуска очистки (-1 = отключено) -->
+        <CleanupMinute>0</CleanupMinute>
+        <!-- Максимум строк в ddl_dcl_audit_log -->
+        <MaxDdlDclAuditRows>500000</MaxDdlDclAuditRows>
+        <!-- Максимум строк в sessions -->
+        <MaxSessionsRows>500000</MaxSessionsRows>
+    </Cleanup>
 
     <!-- Пути до логов OBProxy -->
     <ObProxyLogPaths>
@@ -66,7 +82,6 @@
             <!-- <Host>192.168.55.206:2881</Host> -->
         </Hosts>
         <User>ob_cluster_admin@sys</User>
-        <!-- Password: оставить пустым → возьмём из env OB_TA_PASSWORD или OB_PASSWORD -->
         <Password>qaz123</Password>
         <Database>oceanbase</Database>
     </SystemTenantConnection>
