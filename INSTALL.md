@@ -141,7 +141,7 @@ nano ~/obauditor/config.xml
     <!--
         DDL/DCL аудит из GV$OB_SQL_AUDIT
         0 = отключён | 1 = основной коллектор | 2 = резервный коллектор
-        Рекомендация: на одном узле ставить 1, на остальных 2
+        Рекомендация: на одном узле ставить 1, на на другом 2, на остальных 0
     -->
     <DdlDclAuditMode>1</DdlDclAuditMode>
 
@@ -332,7 +332,7 @@ ls -la /tmp/ob-auditor-${USER}.lock
 │  ~/obauditor/        │         │  ~/obauditor/        │         │  ~/obauditor/        │
 │    config.xml        │         │    config.xml        │         │    config.xml        │
 │      Mode=1  ◄───────┼──┐      │      Mode=2          │         │      Mode=2          │
-│      Cleanup=0       │  │      │      Cleanup=20       │         │      Cleanup=40       │
+│      Cleanup=0       │  │      │      Cleanup=20      │         │      Cleanup=40       │
 │    run-obauditor.sh  │  │      │    run-obauditor.sh  │         │    run-obauditor.sh  │
 │    cron: * * * * *   │  │      │    cron: * * * * *   │         │    cron: * * * * *   │
 └──────────┬───────────┘  │      └──────────┬───────────┘         └──────────┬───────────┘
