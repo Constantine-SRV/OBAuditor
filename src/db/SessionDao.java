@@ -47,6 +47,15 @@ public class SessionDao {
                     "WHERE proxy_sessid = ? AND logoff_time IS NULL";
 
     /**
+     * Закрыть прямую сессию (без прокси) по session_id + server_ip + source=SERVER.
+     * Используется когда proxy_sessid=0 (from_proxy=false).
+     */
+    private static final String UPDATE_LOGOFF_DIRECT =
+            "UPDATE sessions SET logoff_time = ? " +
+                    "WHERE source = 'SERVER' AND server_ip = ? " +
+                    "  AND session_id = ? AND logoff_time IS NULL";
+
+    /**
      * Закрыть PROXY-строки для которых SERVER зафиксировал неудачный вход.
      *
      * Ситуация: PROXY записал сессию как is_success=1 (соединение установлено),
@@ -145,10 +154,22 @@ public class SessionDao {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────
     /**
-     * Синхронизировать PROXY-строки с неудачными входами из SERVER.
-     *
+     * Закрыть прямую сессию (proxy_sessid=0) по session_id + server_ip.
+     * @return количество обновлённых строк
+     */
+    public int updateLogoffDirect(Long sessionId, String serverIp, String logoffTime) throws SQLException {
+        if (sessionId == null || serverIp == null || serverIp.isEmpty()) return 0;
+        try (PreparedStatement ps = conn.prepareStatement(UPDATE_LOGOFF_DIRECT)) {
+            ps.setString(1, logoffTime);
+            ps.setString(2, serverIp);
+            setUnsignedLong(ps, 3, sessionId);
+            return ps.executeUpdate();
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────── с неудачными входами из SERVER.
+     /*
      * Вызывается один раз в конце каждого прогона (после обработки всех файлов).
      * Закрывает PROXY-строки где SERVER зафиксировал ошибку входа:
      * копирует logoff_time и error_code, выставляет is_success=0.

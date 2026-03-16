@@ -109,8 +109,27 @@ public class LogLineHandler {
     private void handleLogoff(LoginEvent event) {
         Long proxySessid = event.proxySessid != null ? event.proxySessid : event.proxySessionId;
 
-        if (proxySessid == null) {
-            debug("[LogLineHandler] LOGOFF skipped (no proxy_sessid): %s%n", event);
+        // proxy_sessid=0 или null — прямое подключение без прокси
+        // закрываем по session_id + server_ip только для SERVER-записей
+        if (proxySessid == null || proxySessid == 0L) {
+            if ("SERVER".equals(event.source) && event.sessionId != null && !serverIp.isEmpty()) {
+                try {
+                    int updated = sessionDao.updateLogoffDirect(event.sessionId, serverIp, event.eventTime);
+                    if (updated > 0) {
+                        logoffCount++;
+                        debug("[LogLineHandler] LOGOFF direct closed %d row(s) session_id=%s ip=%s%n",
+                                updated, Long.toUnsignedString(event.sessionId), serverIp);
+                    } else {
+                        debug("[LogLineHandler] LOGOFF direct no rows updated session_id=%s%n",
+                                Long.toUnsignedString(event.sessionId));
+                    }
+                } catch (SQLException ex) {
+                    System.err.printf("[LogLineHandler] updateLogoffDirect failed session_id=%s: %s%n",
+                            Long.toUnsignedString(event.sessionId), ex.getMessage());
+                }
+            } else {
+                debug("[LogLineHandler] LOGOFF skipped (no proxy_sessid, no session_id or ip): %s%n", event);
+            }
             return;
         }
 
