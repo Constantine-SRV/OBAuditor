@@ -49,36 +49,46 @@ public class CleanupDao {
             return 0;
         }
 
-        // Шаг 1: получаем MAX(id)
-        long maxId;
-        String selectSql = "SELECT MAX(id) FROM " + tableName;
-        try (PreparedStatement ps = conn.prepareStatement(selectSql);
+        // Шаг 1: считаем реальное количество строк
+        long count;
+        try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM " + tableName);
              ResultSet rs = ps.executeQuery()) {
-            if (!rs.next() || rs.getObject(1) == null) {
-                debug("[CleanupDao] " + tableName + " — empty table, nothing to delete");
-                return 0;
-            }
-            maxId = rs.getLong(1);
+            if (!rs.next()) return 0;
+            count = rs.getLong(1);
         }
 
-        // Шаг 2: вычисляем граничный id
-        long boundary = maxId - maxRows;
-        if (boundary <= 0) {
-            debug("[CleanupDao] " + tableName + " — rows count within limit (maxId=" + maxId + "), skip");
+        if (count <= maxRows) {
+            debug("[CleanupDao] " + tableName + " — count=" + count + " <= maxRows=" + maxRows + ", skip");
             return 0;
         }
 
-        // Шаг 3: удаляем
-        debug("[CleanupDao] " + tableName + " — deleting id < " + boundary + " (maxId=" + maxId + ", maxRows=" + maxRows + ")");
-        String deleteSql = "DELETE FROM " + tableName + " WHERE id < ?";
+        // Шаг 2: находим id первой строки которую нужно оставить
+        // (пропускаем count-maxRows самых старых строк)
+        long offset = count - maxRows;
+        Long boundary;
+        String offsetSql = "SELECT id FROM " + tableName + " ORDER BY id ASC LIMIT 1 OFFSET ?";
+        try (PreparedStatement ps = conn.prepareStatement(offsetSql)) {
+            ps.setLong(1, offset);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    debug("[CleanupDao] " + tableName + " — boundary not found, skip");
+                    return 0;
+                }
+                boundary = rs.getLong(1);
+            }
+        }
+
+        // Шаг 3: удаляем всё строго левее границы
+        debug("[CleanupDao] " + tableName + " — deleting id < " + boundary
+                + " (count=" + count + ", maxRows=" + maxRows + ", offset=" + offset + ")");
         int deleted;
-        try (PreparedStatement ps = conn.prepareStatement(deleteSql)) {
+        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM " + tableName + " WHERE id < ?")) {
             ps.setLong(1, boundary);
             deleted = ps.executeUpdate();
         }
         conn.commit();
 
-        info(String.format("[CleanupDao] %s — deleted %d old row(s) (kept last %d)", tableName, deleted, maxRows));
+        info(String.format("[CleanupDao] %s — deleted %d old row(s), kept %d", tableName, deleted, maxRows));
         return deleted;
     }
 }
