@@ -49,10 +49,12 @@ public class SessionDao {
     /**
      * Закрыть прямую сессию (без прокси) по session_id + server_ip + source=SERVER.
      * Используется когда proxy_sessid=0 (from_proxy=false).
+     * cluster_name='' — SERVER-строки всегда имеют пустой cluster_name,
+     * это позволяет OceanBase использовать UNIQUE KEY (source,server_ip,cluster_name,session_id,...) полностью.
      */
     private static final String UPDATE_LOGOFF_DIRECT =
             "UPDATE sessions SET logoff_time = ? " +
-                    "WHERE source = 'SERVER' AND server_ip = ? " +
+                    "WHERE source = 'SERVER' AND server_ip = ? AND cluster_name = '' " +
                     "  AND session_id = ? AND logoff_time IS NULL";
 
     /**
@@ -168,14 +170,7 @@ public class SessionDao {
         }
     }
 
-    // ───────────────────────────────────────────────────────────────── с неудачными входами из SERVER.
-     /*
-     * Вызывается один раз в конце каждого прогона (после обработки всех файлов).
-     * Закрывает PROXY-строки где SERVER зафиксировал ошибку входа:
-     * копирует logoff_time и error_code, выставляет is_success=0.
-     *
-     * @return количество обновлённых PROXY-строк
-     */
+
     public int syncFailedProxySessions() throws SQLException {
         try (Statement st = conn.createStatement()) {
             int updated = st.executeUpdate(SYNC_FAILED_PROXY);

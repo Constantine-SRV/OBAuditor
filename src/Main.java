@@ -92,7 +92,9 @@ public class Main {
                     config.systemTenantConnection.user,
                     config.systemTenantConnection.password
             );
-            conn.setAutoCommit(false);
+            // autoCommit=true: каждый запрос коммитится сразу.
+            // Это предотвращает многочасовые блокировки на стороне OceanBase
+            // если Java-соединение обрывается посередине прогона.
 
             // 6a. Обработка лог-файлов (логины/логоффы)
             LogFileProcessor processor = new LogFileProcessor(conn, config);
@@ -134,7 +136,6 @@ public class Main {
                 }
             }
 
-            conn.commit();
             conn.close();
 
             long totalMs = System.currentTimeMillis() - totalStart;

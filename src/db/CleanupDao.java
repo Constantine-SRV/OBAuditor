@@ -78,15 +78,24 @@ public class CleanupDao {
             }
         }
 
-        // Шаг 3: удаляем всё строго левее границы
+        // Шаг 3: удаляем в собственной транзакции
         debug("[CleanupDao] " + tableName + " — deleting id < " + boundary
                 + " (count=" + count + ", maxRows=" + maxRows + ", offset=" + offset + ")");
         int deleted;
-        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM " + tableName + " WHERE id < ?")) {
-            ps.setLong(1, boundary);
-            deleted = ps.executeUpdate();
+        boolean prevAutoCommit = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        try {
+            try (PreparedStatement ps = conn.prepareStatement("DELETE FROM " + tableName + " WHERE id < ?")) {
+                ps.setLong(1, boundary);
+                deleted = ps.executeUpdate();
+            }
+            conn.commit();
+        } catch (SQLException e) {
+            conn.rollback();
+            throw e;
+        } finally {
+            conn.setAutoCommit(prevAutoCommit);
         }
-        conn.commit();
 
         info(String.format("[CleanupDao] %s — deleted %d old row(s), kept %d", tableName, deleted, maxRows));
         return deleted;

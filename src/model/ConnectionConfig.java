@@ -26,7 +26,7 @@ public class ConnectionConfig {
         return "jdbc:oceanbase://" + hostsPart + "/" + db +
                 "?useSSL=false" +
                 "&allowPublicKeyRetrieval=true" +
-                "&sessionVariables=ob_query_timeout=10000000000" +
+                "&sessionVariables=ob_query_timeout=30000000" +
                 "&connectTimeout=5000" +
                 "&socketTimeout=30000";
     }

@@ -89,6 +89,7 @@ public class ObServerLineParser {
         // Служебные пользователи — исключаем (список из конфига)
         if (ignoredUsers.contains(userName)) return null;
 
+        
         // Loopback = внутренние соединения OBAgent и подобных.
         // Раскомментировать если шум от локальных подключений станет проблемой.
         // if ("127.0.0.1".equals(directClientIp)) return null;

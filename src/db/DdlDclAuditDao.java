@@ -159,12 +159,22 @@ public class DdlDclAuditDao {
 
     // ─────────────────────────────────────────────────────────────────
     private void updateCollectorState(long newRequestTime) throws SQLException {
-        String sql = "UPDATE admintools.audit_collector_state " +
-                "SET last_request_time = ?, updated_at = NOW(6) WHERE id = 1";
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, newRequestTime);
-            ps.executeUpdate();
+        // Атомарно обновляем позицию: временно отключаем autoCommit для этой операции
+        boolean prevAutoCommit = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        try {
+            String sql = "UPDATE admintools.audit_collector_state " +
+                    "SET last_request_time = ?, updated_at = NOW(6) WHERE id = 1";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setLong(1, newRequestTime);
+                ps.executeUpdate();
+            }
+            conn.commit();
+        } catch (SQLException e) {
+            conn.rollback();
+            throw e;
+        } finally {
+            conn.setAutoCommit(prevAutoCommit);
         }
-        conn.commit();
     }
 }
