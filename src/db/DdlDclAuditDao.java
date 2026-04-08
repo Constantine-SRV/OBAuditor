@@ -120,14 +120,15 @@ public class DdlDclAuditDao {
     // ─────────────────────────────────────────────────────────────────
     private int insertNewRows(long lastRequestTime, long newRequestTime) throws SQLException {
         String sql =
-            "INSERT IGNORE INTO admintools.ddl_dcl_audit_log (" +
+    "INSERT IGNORE INTO admintools.ddl_dcl_audit_log (" +
             "  request_id, svr_ip, tenant_id, tenant_name, user_id, user_name, proxy_user," +
-            "  client_ip, user_client_ip, sid, db_name, stmt_type, query_sql," +
+            "  client_ip, user_client_ip, sid, db_name, stmt_type, query_sql," +   // <-- только имя колонки
             "  ret_code, affected_rows, request_ts, elapsed_time, retry_cnt" +
             ") " +
             "SELECT " +
             "  request_id, svr_ip, tenant_id, tenant_name, user_id, user_name, proxy_user," +
-            "  client_ip, user_client_ip, sid, db_name, stmt_type, query_sql," +
+            "  client_ip, user_client_ip, sid, db_name, stmt_type," +
+            "  REGEXP_REPLACE(query_sql, '^[[:space:]]*/[*].*?[*]/[[:space:]]*', '')," +  // <-- здесь
             "  ret_code, affected_rows, usec_to_time(request_time), elapsed_time, retry_cnt" +
             " FROM oceanbase.GV$OB_SQL_AUDIT" +
             " WHERE is_inner_sql = 0" +
@@ -145,8 +146,12 @@ public class DdlDclAuditDao {
             "       'GRANT','REVOKE'," +
             "       'ALTER_USER','SET_PASSWORD'" +
             "     )" +
-            "     OR (stmt_type = 'NONE' AND (" +
-            "       query_sql LIKE 'CREATE USER%' OR query_sql LIKE 'ALTER USER%'" +
+            "     OR (" +
+                    "query_sql not LIKE 'INSERT IGNORE INTO admintools.ddl_dcl_audit_log%' and (" +
+                    "query_sql LIKE 'CREATE USER%' " +
+                    "OR query_sql LIKE '%ALTER USER%' " +
+                    "OR query_sql LIKE '%lock_user(%' " +
+                    "OR query_sql LIKE '%unlock_user(%' " +
             "     ))" +
             "   )";
 
