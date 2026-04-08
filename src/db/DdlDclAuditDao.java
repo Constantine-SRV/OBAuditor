@@ -122,13 +122,13 @@ public class DdlDclAuditDao {
         String sql =
     "INSERT IGNORE INTO admintools.ddl_dcl_audit_log (" +
             "  request_id, svr_ip, tenant_id, tenant_name, user_id, user_name, proxy_user," +
-            "  client_ip, user_client_ip, sid, db_name, stmt_type, query_sql," +   // <-- только имя колонки
+            "  client_ip, user_client_ip, sid, db_name, stmt_type, query_sql," +
             "  ret_code, affected_rows, request_ts, elapsed_time, retry_cnt" +
             ") " +
             "SELECT " +
             "  request_id, svr_ip, tenant_id, tenant_name, user_id, user_name, proxy_user," +
             "  client_ip, user_client_ip, sid, db_name, stmt_type," +
-            "  REGEXP_REPLACE(query_sql, '^[[:space:]]*/[*].*?[*]/[[:space:]]*', '')," +  // <-- здесь
+            "  REGEXP_REPLACE(query_sql, '^[[:space:]]*/[*].*?[*]/[[:space:]]*', '')," +
             "  ret_code, affected_rows, usec_to_time(request_time), elapsed_time, retry_cnt" +
             " FROM oceanbase.GV$OB_SQL_AUDIT" +
             " WHERE is_inner_sql = 0" +
@@ -149,7 +149,7 @@ public class DdlDclAuditDao {
             "     OR (" +
                     "query_sql not LIKE 'INSERT IGNORE INTO admintools.ddl_dcl_audit_log%' and (" +
                     "query_sql LIKE 'CREATE USER%' " +
-                    "OR query_sql LIKE '%ALTER USER%' " +
+                    "OR query_sql LIKE 'ALTER USER%' " +
                     "OR query_sql LIKE '%lock_user(%' " +
                     "OR query_sql LIKE '%unlock_user(%' " +
             "     ))" +
