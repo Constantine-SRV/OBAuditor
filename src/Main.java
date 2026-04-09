@@ -140,7 +140,7 @@ public class Main {
 
             long totalMs = System.currentTimeMillis() - totalStart;
             System.out.printf(
-                "[Main] Done. Total time: %d ms | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d" +
+                "[Main] Done. v20260409-1 Total time: %d ms | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d" +
                 " | ddlDcl: %d | cleanedDdlDcl: %d | cleanedSessions: %d%n",
                 totalMs,
                 processor.getTotalLines(),
