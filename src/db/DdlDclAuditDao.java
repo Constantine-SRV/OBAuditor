@@ -120,40 +120,44 @@ public class DdlDclAuditDao {
     // ─────────────────────────────────────────────────────────────────
     private int insertNewRows(long lastRequestTime, long newRequestTime) throws SQLException {
         String sql =
-    "INSERT IGNORE INTO admintools.ddl_dcl_audit_log (" +
-            "  request_id, svr_ip, tenant_id, tenant_name, user_id, user_name, proxy_user," +
-            "  client_ip, user_client_ip, sid, db_name, stmt_type, query_sql," +
-            "  ret_code, affected_rows, request_ts, elapsed_time, retry_cnt" +
-            ") " +
-            "SELECT " +
-            "  request_id, svr_ip, tenant_id, tenant_name, user_id, user_name, proxy_user," +
-            "  client_ip, user_client_ip, sid, db_name, stmt_type," +
-            "  REGEXP_REPLACE(query_sql, '^[[:space:]]*/[*].*?[*]/[[:space:]]*', '')," +
-            "  ret_code, affected_rows, usec_to_time(request_time), elapsed_time, retry_cnt" +
-            " FROM oceanbase.GV$OB_SQL_AUDIT" +
-            " WHERE is_inner_sql = 0" +
-            "   AND request_time > ?" +
-            "   AND request_time <= ?" +
-            "   AND (" +
-            "     stmt_type IN (" +
-            "       'CREATE_TABLE','ALTER_TABLE','DROP_TABLE'," +
-            "       'CREATE_INDEX','DROP_INDEX'," +
-            "       'CREATE_VIEW','DROP_VIEW'," +
-            "       'CREATE_DATABASE','DROP_DATABASE'," +
-            "       'TRUNCATE_TABLE','RENAME_TABLE'," +
-            "       'CREATE_TENANT','DROP_TENANT'," +
-            "       'DROP_USER','RENAME_USER'," +
-            "       'GRANT','REVOKE'," +
-            "       'ALTER_USER','SET_PASSWORD'" +
-            "     )" +
-            "     OR (" +
-                    "query_sql not LIKE 'INSERT IGNORE INTO admintools.ddl_dcl_audit_log%' and (" +
-                    "query_sql LIKE 'CREATE USER%' " +
-                    "OR query_sql LIKE 'ALTER USER%' " +
-                    "OR query_sql LIKE '%lock_user(%' " +
-                    "OR query_sql LIKE '%unlock_user(%' " +
-            "     ))" +
-            "   )";
+                "INSERT IGNORE INTO admintools.ddl_dcl_audit_log (" +
+                        "  request_id, svr_ip, tenant_id, tenant_name, user_id, user_name, proxy_user," +
+                        "  client_ip, user_client_ip, sid, db_name, stmt_type, query_sql," +
+                        "  ret_code, affected_rows, request_ts, elapsed_time, retry_cnt" +
+                        ") " +
+                        "SELECT " +
+                        "  request_id, svr_ip, tenant_id, tenant_name, user_id, user_name, proxy_user," +
+                        "  client_ip, user_client_ip, sid, db_name, stmt_type," +
+                        "  REGEXP_REPLACE(query_sql, '^[[:space:]]*/[*].*?[*]/[[:space:]]*', '')," +
+                        "  ret_code, affected_rows, usec_to_time(request_time), elapsed_time, retry_cnt" +
+                        " FROM oceanbase.GV$OB_SQL_AUDIT" +
+                        " WHERE is_inner_sql = 0" +
+                        "   AND request_time > ?" +
+                        "   AND request_time <= ?" +
+                        "   AND stmt_type NOT IN ('VARIABLE_SET')" + //мусор в который попадает SET @v_sql='ALTER USER \'testuser\' ACCOUNT LOCK'
+                        "   AND (" +
+                        "     stmt_type IN (" +
+                        "       'CREATE_TABLE','ALTER_TABLE','DROP_TABLE'," +
+                        "       'CREATE_INDEX','DROP_INDEX'," +
+                        "       'CREATE_VIEW','DROP_VIEW'," +
+                        "       'CREATE_DATABASE','DROP_DATABASE'," +
+                        "       'TRUNCATE_TABLE','RENAME_TABLE'," +
+                        "       'CREATE_TENANT','DROP_TENANT'," +
+                        "       'DROP_USER','RENAME_USER'," +
+                        "       'GRANT','REVOKE'," +
+                        "       'ALTER_USER','SET_PASSWORD'" +
+                        "     )" +
+                        "     OR (" +
+                        "       query_sql NOT LIKE 'INSERT IGNORE INTO admintools.ddl_dcl_audit_log%'" +
+                        "       AND (" +
+                        "         query_sql LIKE '%CREATE USER%'" +
+                        "         OR query_sql LIKE '%ALTER USER%'" +
+                        "         OR query_sql LIKE '%lock_user(%'" +
+                        "         OR query_sql LIKE '%unlock_user(%'" +
+                        "       )" +
+                        "     )" +
+                        "   )";
+
 
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, lastRequestTime);
