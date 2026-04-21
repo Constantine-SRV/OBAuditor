@@ -34,7 +34,8 @@ public class DbInitializer {
         try (Connection conn = openConnection(TARGET_DB)) {
             ensureTable(conn, createSessionsTableSql());
             ensureTable(conn, createLogFilesTableSql());
-            ensureTable(conn, createDdlDclAuditCheckpointTableSql());
+            ensureTable(conn, createAuditCollectorStateTableSql());
+            ensureAuditCollectorStateRow(conn);
             ensureTable(conn, createDdlDclAuditLogTableSql());
             ensureTable(conn, createDdlDclAuditTargetsTableSql());
         }
@@ -141,19 +142,25 @@ public class DbInitializer {
         return new TableDef("logfiles", ddl);
     }
 
-    private TableDef createDdlDclAuditCheckpointTableSql() {
+    private void ensureAuditCollectorStateRow(Connection conn) throws SQLException {
+        String sql = "INSERT IGNORE INTO `audit_collector_state` (id, collector_id, last_request_time) VALUES (1, 'ddl_dcl_audit', 0)";
+        try (Statement st = conn.createStatement()) {
+            int rows = st.executeUpdate(sql);
+            if (rows > 0) info("[DbInitializer] Inserted initial row into audit_collector_state");
+            else debug("[DbInitializer] audit_collector_state row already exists");
+        }
+    }
+
+    private TableDef createAuditCollectorStateTableSql() {
         String ddl =
-                "CREATE TABLE `ddl_dcl_audit_checkpoint` (" +
-                        "  `svr_ip`          VARCHAR(46)  NOT NULL COMMENT 'OBServer IP'," +
-                        "  `svr_port`        BIGINT       NOT NULL COMMENT 'RPC-порт (2882) из DBA_OB_UNITS.svr_port'," +
-                        "  `tenant_id`       BIGINT       NOT NULL COMMENT 'ID тенанта'," +
-                        "  `last_request_id` BIGINT       NOT NULL DEFAULT 0 COMMENT 'Последний обработанный request_id'," +
-                        "  `updated_at`      DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6)" +
-                        "                    ON UPDATE CURRENT_TIMESTAMP(6)" +
-                        "                    COMMENT 'Время последнего успешного сбора (для резервного режима)'," +
-                        "  PRIMARY KEY (`svr_ip`, `svr_port`, `tenant_id`)" +
-                        ") COMMENT = 'Курсоры DDL/DCL аудита: последний request_id по каждому серверу и тенанту'";
-        return new TableDef("ddl_dcl_audit_checkpoint", ddl);
+                "CREATE TABLE `audit_collector_state` (" +
+                        "  `id`                BIGINT       NOT NULL," +
+                        "  `collector_id`      VARCHAR(64)  NOT NULL COMMENT 'Идентификатор коллектора'," +
+                        "  `last_request_time` BIGINT       NOT NULL DEFAULT 0 COMMENT 'request_time последней обработанной записи GV$OB_SQL_AUDIT'," +
+                        "  `updated_at`        DATETIME(6)      NULL COMMENT 'Wall-clock время последнего успешного сбора'," +
+                        "  PRIMARY KEY (`id`)" +
+                        ") COMMENT = 'Состояние DDL/DCL коллектора'";
+        return new TableDef("audit_collector_state", ddl);
     }
 
     private TableDef createDdlDclAuditLogTableSql() {

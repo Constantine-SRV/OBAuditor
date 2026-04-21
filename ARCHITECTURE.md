@@ -17,12 +17,10 @@
 14. [Обработка LOGOFF](#обработка-logoff)
 15. [DDL/DCL аудит](#ddldcl-аудит)
     - 15.1 [Режимы работы](#151-режимы-работы)
-    - 15.2 [Почему RANGE SCAN](#152-почему-range-scan-а-не-full-scan)
-    - 15.3 [Таблица курсоров ddl_dcl_audit_checkpoint](#153-таблица-курсоров-ddl_dcl_audit_checkpoint)
-    - 15.4 [Алгоритм collect()](#154-алгоритм-collect)
-    - 15.5 [Хардкод фильтрации](#155-хардкод-фильтрации-ddldcl-событий)
-    - 15.6 [Динамические объекты ddl_dcl_audit_targets](#156-динамические-объекты-ddl_dcl_audit_targets)
-    - 15.7 [Debug-режим](#157-debug-режим)
+    - 15.2 [Алгоритм collect()](#152-алгоритм-collect)
+    - 15.3 [Хардкод фильтрации](#153-хардкод-фильтрации-ddldcl-событий)
+    - 15.4 [Динамические объекты ddl_dcl_audit_targets](#154-динамические-объекты-ddl_dcl_audit_targets)
+    - 15.5 [Debug-режим](#155-debug-режим)
 16. [Управление размером таблиц](#управление-размером-таблиц)
 17. [Уровни логирования](#уровни-логирования)
 18. [Поток данных end-to-end](#поток-данных-end-to-end)
@@ -36,13 +34,12 @@ OBAuditor читает логи OceanBase (SERVER и PROXY), извлекает 
 
 **Стек:** Java 21 (Temurin), OceanBase JDBC, стандартный javax.xml (нет внешних зависимостей кроме драйвера).
 
-**Однопоточная модель.** Сервис намеренно однопоточный: лог-файлы одного узла обрабатываются
-строго последовательно. В реальном развёртывании **один экземпляр = один узел**. На каждом
-узле кластера запускается свой экземпляр — все пишут в одну базу `admintools`, разделяясь по `collector_id`.
+**Однопоточная модель.** Один экземпляр = один узел. На каждом узле кластера запускается
+свой экземпляр — все пишут в одну базу `admintools`, разделяясь по `collector_id`.
 
 **Управление транзакциями.** `autoCommit=true` — каждый INSERT/UPDATE коммитится немедленно,
 предотвращая многочасовые блокировки при обрыве соединения. Для атомарных операций
-(очистка таблиц) используется локальный `setAutoCommit(false)` → `commit()` → восстановление.
+используется локальный `setAutoCommit(false)` → `commit()` → восстановление.
 
 ---
 
@@ -59,10 +56,10 @@ src/
 │   ├── LogFileRecord.java
 │   └── PasswordEnricher.java
 ├── db/
-│   ├── DbInitializer.java           # Создаёт все таблицы включая ddl_dcl_audit_targets
+│   ├── DbInitializer.java           # Создаёт все таблицы
 │   ├── LogFileDao.java
 │   ├── SessionDao.java              # insertLogin, updateLogoff, updateLogoffDirect
-│   ├── DdlDclAuditDao.java          # RANGE SCAN + динамические targets
+│   ├── DdlDclAuditDao.java          # Курсор request_time + динамические targets
 │   └── CleanupDao.java              # COUNT(*)+OFFSET алгоритм
 └── log/
     ├── LogFileProcessor.java
@@ -123,11 +120,9 @@ src/
 
 **Класс:** `DbInitializer.initialize()`
 
-Создаёт базу `admintools` и таблицы (проверка через `information_schema`):
-
 1. `sessions` — логины/логоффы
 2. `logfiles` — состояние чтения файлов
-3. `ddl_dcl_audit_checkpoint` — курсоры DDL/DCL коллектора
+3. `audit_collector_state` — курсор DDL/DCL коллектора (одна строка, id=1)
 4. `ddl_dcl_audit_log` — DDL/DCL события
 5. `ddl_dcl_audit_targets` — объекты для дополнительного DML-аудита
 
@@ -157,8 +152,8 @@ src/
 
 **Индексы:** `idx_login_time`, `idx_user`, `idx_open (logoff_time)`, **`idx_proxy_sessid`**
 
-> `idx_proxy_sessid` критически важен — без него UPDATE при LOGOFF вызывает full scan
-> и может повесить транзакцию на часы.
+> `idx_proxy_sessid` критически важен — без него `UPDATE WHERE proxy_sessid=?` при каждом
+> LOGOFF вызывает full scan и может повесить транзакцию на часы.
 
 ### Таблица `logfiles`
 
@@ -173,31 +168,28 @@ src/
 
 **UNIQUE KEY** `uq_collector_dir_name (collector_id, file_dir(255), file_name)`
 
-### Таблица `ddl_dcl_audit_checkpoint`
+### Таблица `audit_collector_state`
+
+Одна строка (id=1) — глобальный курсор DDL/DCL коллектора.
 
 | Колонка | Описание |
 |---|---|
-| `svr_ip` | IP OBServer |
-| `svr_port` | **RPC-порт (2882)** из `DBA_OB_UNITS.svr_port` |
-| `tenant_id` | ID тенанта |
-| `last_request_id` | Последний обработанный request_id |
-| `updated_at` | Время последнего сбора (для резервного режима) |
-
-**PRIMARY KEY (svr_ip, svr_port, tenant_id)** — совпадает с ключом `GV$OB_SQL_AUDIT`.
+| `id` | PK (всегда 1) |
+| `collector_id` | Идентификатор коллектора |
+| `last_request_time` | `request_time` последней обработанной записи `GV$OB_SQL_AUDIT` |
+| `updated_at` | Wall-clock время последнего успешного сбора (для резервного режима) |
 
 ### Таблица `ddl_dcl_audit_log`
 
 | Колонка | Описание |
 |---|---|
-| `request_id` / `svr_ip` | Ключ дедупликации |
+| `request_id` / `svr_ip` | Ключ дедупликации (`UNIQUE KEY uq_req`) |
 | `tenant_id` / `tenant_name` | Тенант |
 | `user_id` / `user_name` | Пользователь |
 | `db_name` / `stmt_type` | База / тип оператора |
-| `query_sql` | SQL (очищен от `/* ... */` комментариев) |
+| `query_sql` | SQL (очищен от ведущих `/* ... */` комментариев) |
 | `request_ts` | Время выполнения |
 | `ret_code` / `elapsed_time` | Результат / время |
-
-**UNIQUE KEY** `uq_req (svr_ip, request_id)`
 
 ### Таблица `ddl_dcl_audit_targets`
 
@@ -205,13 +197,11 @@ src/
 
 | Колонка | Описание |
 |---|---|
-| `id` | PK |
 | `tenant_id` | NULL = все тенанты |
 | `db_name` | NULL = любая база |
 | `object_name` | Имя таблицы / процедуры / вьюшки |
-| `description` | Описание (для чего аудируем) |
+| `description` | Описание |
 | `is_active` | 1=активен, 0=отключён |
-| `created_at` | Дата добавления |
 
 ---
 
@@ -219,7 +209,7 @@ src/
 
 ```
 processDirectory(dirPath, fileType):
-  File.listFiles() → фильтр по имени (observer.log*, obproxy.log*)
+  File.listFiles() → фильтр (observer.log*, obproxy.log*)
   loadByDir(collectorId, dirPath) → Map<fileName, LogFileRecord>
   Сортировка: ротированные первыми, активный последним
   → processFile() для каждого
@@ -231,11 +221,11 @@ processDirectory(dirPath, fileType):
 
 ```
 processFile():
-  startOffset = record.lastLineNum (байтовый offset)
+  startOffset = record.lastLineNum  (байтовый offset из logfiles)
   если size не изменился → пропускаем
 
 readAndProcess():
-  FileChannel.position(startOffset)  // O(1) прыжок
+  FileChannel.position(startOffset)  // O(1) прыжок к нужному байту
   BufferedReader → строки до EOF
   record.lastLineNum = channel.position()
 ```
@@ -246,8 +236,8 @@ readAndProcess():
 
 ```
 shouldResetToStart():
-  currentSize < record.fileSize     → ротация
-  lastTimestamp старше 10 минут     → читаем сначала
+  currentSize < record.fileSize  → ротация (файл стал меньше)
+  lastTimestamp старше 10 минут  → читаем сначала
 
 При ротации: offset=0, timestamp/tid/traceId очищаются, fileIp сохраняется.
 ```
@@ -284,7 +274,6 @@ IP OBServer-узла клиента → `sessions.server_node_ip`
 
 ```java
 if (ignoredUsers.contains(userName)) return null;  // список из конфига
-// if ("127.0.0.1".equals(directClientIp)) return null;  // опционально
 ```
 
 ---
@@ -353,64 +342,35 @@ WHERE p.source='PROXY' AND p.logoff_time IS NULL
 | Режим | Поведение |
 |---|---|
 | `0` | Отключён |
-| `1` | Основной — собирает всегда |
-| `2` | Резервный — собирает если `MIN(updated_at)` > 2 мин (основной упал) |
+| `1` | Основной — собирает при каждом запуске |
+| `2` | Резервный — только если `updated_at` в `audit_collector_state` старше 2 минут |
 
 **Рекомендация:** один узел с режимом `1`, остальные с `2`.
 
-### 15.2 Почему RANGE SCAN, а не FULL SCAN
-
-`GV$OB_SQL_AUDIT` (`__all_virtual_sql_audit`) имеет PK `(svr_ip, svr_port, tenant_id, request_id)`.
-
-Фильтр по `request_time` → **TABLE FULL SCAN** (100k строк всегда).
-
-Фильтр по всем 4 компонентам PK → **TABLE RANGE SCAN**:
-```sql
-WHERE svr_ip = ? AND svr_port = ? AND tenant_id = ? AND request_id > ?
-```
-
-### 15.3 Таблица курсоров `ddl_dcl_audit_checkpoint`
-
-Один ряд на `(svr_ip, svr_port, tenant_id)`. `svr_port` = RPC-порт (2882) из `DBA_OB_UNITS.svr_port` — именно его использует `GV$OB_SQL_AUDIT` в PK.
-
-`ensureCursors()` синхронизирует таблицу с кластером при каждом вызове:
-- `INSERT IGNORE` для новых комбинаций из `DBA_OB_UNITS JOIN __all_server`
-- `DELETE` выбывших серверов/тенантов
-
-### 15.4 Алгоритм `collect()`
+### 15.2 Алгоритм `collect()`
 
 ```
-1. ensureCursors()
-2. loadCheckpoints() → List<CheckpointRow>
-3. loadTargets() → List<AuditTarget>  ← из ddl_dcl_audit_targets
-
-4. для каждого CheckpointRow:
-   targets = filterTargets(all, cp.tenantId)  ← tenant_id=NULL или совпадает
-   buildInsertSql(targets)  ← динамически с OR-условиями из targets
-
-   INSERT IGNORE INTO ddl_dcl_audit_log
+1. last_rt ← SELECT last_request_time FROM audit_collector_state WHERE id=1
+2. new_rt  ← SELECT MAX(request_time) FROM GV$OB_SQL_AUDIT
+             WHERE is_inner_sql=0 AND request_time > last_rt
+3. targets ← SELECT * FROM ddl_dcl_audit_targets WHERE is_active=1
+4. INSERT IGNORE INTO ddl_dcl_audit_log
    SELECT ... FROM GV$OB_SQL_AUDIT
-   WHERE svr_ip=? AND svr_port=? AND tenant_id=? AND request_id > ?
-     AND <фильтр DDL/DCL хардкод + динамические targets>
-   ORDER BY request_id LIMIT 5000
-
-   если inserted > 0:
-     max_id = SELECT MAX(request_id) FROM ddl_dcl_audit_log
-              WHERE svr_ip=? AND tenant_id=? AND request_id > last  ← фильтр по tenant_id!
-     UPDATE checkpoint SET last_request_id=max_id
-
-   если inserted == 5000 → catch-up (повторить этот чекпоинт)
+   WHERE is_inner_sql=0
+     AND request_time > last_rt AND request_time <= new_rt
+     AND <хардкод фильтр + динамические targets>
+5. UPDATE audit_collector_state SET last_request_time=new_rt, updated_at=NOW(6)
 ```
 
-> **Важно:** запрос за новым `max_id` обязательно фильтрует по `tenant_id`.
-> Без этого значения из разных тенантов смешиваются и курсор может уйти далеко вперёд,
-> пропуская события текущего тенанта.
+`INSERT IGNORE` + UNIQUE KEY `uq_req (svr_ip, request_id)` защищают от дублей
+при параллельной работе нескольких коллекторов.
 
-### 15.5 Хардкод фильтрации DDL/DCL событий
+### 15.3 Хардкод фильтрации DDL/DCL событий
 
-Жёстко прописан в коде — не может быть изменён через конфиг (требование безопасников):
+Жёстко прописан в коде — не может быть изменён через конфиг или таблицу targets.
 
 ```sql
+-- DDL по stmt_type
 stmt_type IN (
     'CREATE_TABLE','ALTER_TABLE','DROP_TABLE',
     'CREATE_INDEX','DROP_INDEX',
@@ -421,6 +381,8 @@ stmt_type IN (
     'DROP_USER','RENAME_USER',
     'GRANT','REVOKE','ALTER_USER','SET_PASSWORD'
 )
+
+-- User management через LIKE (нет отдельного stmt_type)
 OR (
     query_sql NOT LIKE 'INSERT IGNORE INTO admintools.ddl_dcl_audit_log%'
     AND (
@@ -430,62 +392,59 @@ OR (
         OR query_sql LIKE '%unlock_user(%'
     )
 )
+
+-- DELETE/UPDATE таблиц аудита (требование безопасников)
+-- Исключены наши собственные служебные UPDATE (закрытие логоффов, reconciliation)
+OR (
+    stmt_type IN ('DELETE', 'UPDATE')
+    AND query_sql NOT LIKE 'UPDATE sessions SET logoff_time%'
+    AND query_sql NOT LIKE 'UPDATE sessions p JOIN sessions s%'
+    AND (
+        query_sql LIKE '%admintools.sessions%'
+        OR query_sql LIKE '%admintools.ddl_dcl_audit_log%'
+        OR (db_name = 'admintools' AND query_sql LIKE '%sessions%')
+        OR (db_name = 'admintools' AND query_sql LIKE '%ddl_dcl_audit_log%')
+    )
+)
 ```
 
-`stmt_type NOT IN ('VARIABLE_SET')` — исключаем мусор.
-`query_sql` очищается от leading `/* ... */` через `REGEXP_REPLACE`.
+`stmt_type NOT IN ('VARIABLE_SET')` — исключает мусор.
+`query_sql` очищается от ведущего `/* ... */` через `REGEXP_REPLACE`.
 
-### 15.6 Динамические объекты `ddl_dcl_audit_targets`
+### 15.4 Динамические объекты `ddl_dcl_audit_targets`
 
-Для аудита DML-операций над конкретными объектами (таблицами, процедурами) — без перекомпиляции.
+Аудит DML-операций над конкретными объектами без перекомпиляции.
 
-**Добавление объекта:**
+**Добавление:**
 ```sql
 INSERT INTO admintools.ddl_dcl_audit_targets (tenant_id, db_name, object_name, description)
 VALUES (1002, 'testdb', 'HISTORY_OPERATION', 'Аудит DML по таблице истории операций');
 ```
 
-**Логика LIKE для каждой записи:**
+**Логика LIKE:**
 
 | `db_name` | Условие в SQL |
 |---|---|
 | задан | `query_sql LIKE '%db.obj%' OR (db_name='db' AND query_sql LIKE '%obj%')` |
 | NULL | `query_sql LIKE '%obj%'` |
 
-**Фильтрация по тенанту:** если `tenant_id` задан — применяется только к соответствующему чекпоинту. NULL = все тенанты.
-
-**Отключение без удаления:** `UPDATE ddl_dcl_audit_targets SET is_active=0 WHERE id=N`
+**Отключение:** `UPDATE ddl_dcl_audit_targets SET is_active=0 WHERE id=N`
 
 Targets загружаются в начале каждого `collect()` — изменения применяются в следующем прогоне.
 
-### 15.7 Debug-режим
+### 15.5 Debug-режим
 
-При `LogLevel=DEBUG` выводится полный SQL с подставленными параметрами:
-
-```
-[DdlDclAuditDao] SQL:
-INSERT IGNORE INTO admintools.ddl_dcl_audit_log (...)
-SELECT ... FROM oceanbase.GV$OB_SQL_AUDIT
-WHERE svr_ip    = '192.168.55.205'
-  AND svr_port  = 2882
-  AND tenant_id = 1002
-  AND request_id > 142256791
-  AND ...
-  OR (query_sql LIKE '%testdb.HISTORY_OPERATION%'
-      OR (db_name = 'testdb' AND query_sql LIKE '%HISTORY_OPERATION%'))
-ORDER BY request_id LIMIT 5000
-```
-
-Заменить `INSERT IGNORE INTO ... SELECT` на просто `SELECT` или добавить `EXPLAIN` — и запустить в клиенте.
+При `LogLevel=DEBUG` перед INSERT выводится полный SQL с подставленными параметрами.
+Можно скопировать, заменить INSERT на SELECT и запустить `EXPLAIN` в клиенте.
 
 ---
 
 ## Управление размером таблиц
 
 **Класс:** `CleanupDao`. Запускается в минуту `config.cleanupMinute`.
-Расставляя `0`, `20`, `40` на разных узлах — гарантированное удаление раз в час.
+Разные минуты на разных узлах (0, 20, 40) — гарантированное удаление раз в час.
 
-**Алгоритм (корректный для AUTO_INCREMENT с пропусками):**
+**Алгоритм:**
 ```
 COUNT(*) ≤ maxRows → выход
 offset = COUNT(*) - maxRows
@@ -493,7 +452,8 @@ boundary = SELECT id FROM table ORDER BY id ASC LIMIT 1 OFFSET offset
 DELETE FROM table WHERE id < boundary
 ```
 
-Старый `MAX(id) - maxRows` давал неверный результат из-за пропусков AUTO_INCREMENT.
+`MAX(id) - maxRows` давал неверный результат из-за пропусков AUTO_INCREMENT.
+`COUNT(*) + LIMIT/OFFSET` гарантирует точное число оставшихся строк.
 
 ---
 
@@ -521,7 +481,7 @@ Main.main()
     ├─ ObServerLineParser.setIgnoredUsers()
     ├─ DbInitializer.initialize()
     │      └─ CREATE TABLE sessions, logfiles,
-    │                      ddl_dcl_audit_checkpoint, ddl_dcl_audit_log,
+    │                      audit_collector_state, ddl_dcl_audit_log,
     │                      ddl_dcl_audit_targets
     │
     ├─ LogFileProcessor(conn, config)  [autoCommit=true]
@@ -536,22 +496,18 @@ Main.main()
     ├─ SessionDao.syncFailedProxySessions()
     │
     ├─ DdlDclAuditDao.collect()  (если mode > 0)
-    │      ├─ ensureCursors()  → INSERT IGNORE/DELETE в checkpoint
-    │      ├─ loadTargets()    → List<AuditTarget> из ddl_dcl_audit_targets
-    │      └─ for each (svr_ip, svr_port, tenant_id, last_request_id):
-    │           targets = filterTargets(all, tenant_id)
-    │           INSERT IGNORE INTO ddl_dcl_audit_log
+    │      ├─ [mode=2] shouldCollectFallback() → updated_at > 2 мин?
+    │      ├─ last_rt ← audit_collector_state
+    │      ├─ new_rt  ← MAX(request_time) FROM GV$OB_SQL_AUDIT WHERE > last_rt
+    │      ├─ targets ← ddl_dcl_audit_targets WHERE is_active=1
+    │      └─ INSERT IGNORE INTO ddl_dcl_audit_log
     │           SELECT ... FROM GV$OB_SQL_AUDIT
-    │           WHERE svr_ip=? AND svr_port=? AND tenant_id=?
-    │             AND request_id > ?            ← TABLE RANGE SCAN
-    │             AND <хардкод DDL/DCL>
+    │           WHERE request_time > last_rt AND request_time <= new_rt
+    │             AND <хардкод DDL/DCL + DELETE/UPDATE sessions/audit_log>
     │             OR  <динамические targets>
-    │           ORDER BY request_id LIMIT 5000
-    │           [catch-up если inserted==5000]
-    │           max_id = MAX(request_id) WHERE svr_ip=? AND tenant_id=? AND request_id>last
-    │           UPDATE checkpoint SET last_request_id=max_id
+    │           UPDATE audit_collector_state SET last_request_time=new_rt
     │
-    └─ CleanupDao  (если минута совпадает)
+    └─ CleanupDao  (если текущая минута == cleanupMinute)
            COUNT(*) → OFFSET → boundary → DELETE WHERE id < boundary
 
 [Main] Done. vYYYYMMDD-N | lines | inserted | logoff | logoffMiss | ddlDcl | cleaned*

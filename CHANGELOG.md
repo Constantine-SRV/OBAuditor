@@ -1,13 +1,6 @@
 # OBAuditor — История изменений
 
-## v20260415 (2026-04-15)
-
-**DDL/DCL аудит: переход на RANGE SCAN**
-
-Запросы к `GV$OB_SQL_AUDIT` теперь идут по первичному ключу `(svr_ip, svr_port, tenant_id, request_id)`
-вместо фильтрации по `request_time`. TABLE RANGE SCAN читает только новые записи с момента
-последнего прогона, а не весь буфер из 100k строк. Курсор хранится в таблице
-`ddl_dcl_audit_checkpoint` отдельно для каждого сервера и тенанта.
+## v20260415 (2026-04-21)
 
 **Кастомные объекты аудита**
 
@@ -19,7 +12,13 @@ INSERT INTO admintools.ddl_dcl_audit_targets (tenant_id, db_name, object_name, d
 VALUES (1002, 'testdb', 'HISTORY_OPERATION', 'Аудит DML по таблице истории операций');
 ```
 
-Изменения применяются при следующем запуске сервиса. Для отключения объекта: `SET is_active = 0`.
+Изменения применяются при следующем запуске сервиса. Для отключения: `SET is_active = 0`.
+
+**Аудит DELETE/UPDATE таблиц журналов**
+
+В хардкод фильтра добавлен перехват `DELETE` и `UPDATE` по таблицам `admintools.sessions`
+и `admintools.ddl_dcl_audit_log`. Служебные UPDATE сервиса (закрытие логоффов, reconciliation)
+исключены автоматически.
 
 ---
 
