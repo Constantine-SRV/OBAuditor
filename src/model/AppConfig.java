@@ -86,6 +86,14 @@ public class AppConfig {
     public int rsyslogPort = 514;
 
     /**
+     * Syslog facility для отправки событий.
+     * RFC 3164: kern, user, mail, daemon, auth, syslog, lpr, news, uucp, cron,
+     * local0..local7. По умолчанию user.
+     * Важно: local0 может перехватываться правилами SOC/SIEM в некоторых окружениях.
+     */
+    public String rsyslogFacility = "user";
+
+    /**
      * Максимальное количество записей одного типа (login / logoff / ddl)
      * за один батч. Все новые записи будут отправлены за один цикл запуска
      * через несколько батчей подряд. По умолчанию 500.
@@ -107,6 +115,7 @@ public class AppConfig {
                 "  rsyslogHost=" + rsyslogHost + "\n" +
                 "  rsyslogPort=" + rsyslogPort + "\n" +
                 "  rsyslogBatchSize=" + rsyslogBatchSize + "\n" +
+                "  rsyslogFacility=" + rsyslogFacility + "\n" +
                 "  systemTenantConnection=" + systemTenantConnection + "\n" +
                 "}";
     }

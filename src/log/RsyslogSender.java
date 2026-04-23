@@ -33,8 +33,8 @@ import java.time.format.DateTimeFormatter;
  */
 public class RsyslogSender {
 
-    // <134> = facility local0 (16) * 8 + severity info (6)
-    private static final String PRI      = "<134>";
+    // PRI = (facility * 8) + severity_info(6), вычисляется из конфига
+    private final String PRI;
     private static final int    MAX_MSG  = 1024; // RFC 3164
 
     private static final DateTimeFormatter SYSLOG_TS =
@@ -50,13 +50,46 @@ public class RsyslogSender {
     private final AppConfig.LogLevel logLevel;
 
     public RsyslogSender(Connection conn, String host, int port, int batchSize,
-                         AppConfig.LogLevel logLevel) {
+                         String facility, AppConfig.LogLevel logLevel) {
         this.conn          = conn;
         this.host          = host;
         this.port          = port;
         this.batchSize     = batchSize > 0 ? batchSize : 500;
         this.logLevel      = logLevel != null ? logLevel : AppConfig.LogLevel.INFO;
         this.localHostname = resolveHostname();
+        this.PRI           = "<" + (resolveFacility(facility) * 8 + 6) + ">";
+    }
+
+    /**
+     * RFC 3164 facility numbers.
+     * Поддерживаемые значения: kern(0), user(1), mail(2), daemon(3),
+     * auth(4), syslog(5), lpr(6), news(7), uucp(8), cron(9),
+     * local0(16)..local7(23).
+     * По умолчанию: user(1).
+     */
+    private static int resolveFacility(String name) {
+        if (name == null) return 1;
+        switch (name.trim().toLowerCase()) {
+            case "kern":   return 0;
+            case "user":   return 1;
+            case "mail":   return 2;
+            case "daemon": return 3;
+            case "auth":   return 4;
+            case "syslog": return 5;
+            case "lpr":    return 6;
+            case "news":   return 7;
+            case "uucp":   return 8;
+            case "cron":   return 9;
+            case "local0": return 16;
+            case "local1": return 17;
+            case "local2": return 18;
+            case "local3": return 19;
+            case "local4": return 20;
+            case "local5": return 21;
+            case "local6": return 22;
+            case "local7": return 23;
+            default:       return 1; // user
+        }
     }
 
     private void info(String msg)  { if (logLevel != AppConfig.LogLevel.ERROR) System.out.println(msg); }

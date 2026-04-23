@@ -65,6 +65,8 @@ public class AppConfigReader {
             if (rsHost != null && !rsHost.isEmpty()) cfg.rsyslogHost = rsHost;
             cfg.rsyslogPort      = parseInt(getText(rsyslogEl, "Port"),      514);
             cfg.rsyslogBatchSize = parseInt(getText(rsyslogEl, "BatchSize"), 500);
+            String facility = getText(rsyslogEl, "Facility");
+            if (facility != null && !facility.isEmpty()) cfg.rsyslogFacility = facility;
         }
 
         return cfg;

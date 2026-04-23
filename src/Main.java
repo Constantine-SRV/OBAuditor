@@ -72,6 +72,7 @@ public class Main {
             System.out.println("OBServer log paths : " + config.obServerLogPaths);
             System.out.println("RsyslogHost        : " + config.rsyslogHost);
             System.out.println("RsyslogPort        : " + config.rsyslogPort);
+            System.out.println("RsyslogFacility    : " + config.rsyslogFacility);
             System.out.println("RsyslogBatchSize   : " + config.rsyslogBatchSize);
             System.out.println("DB connection      : " + config.systemTenantConnection);
             System.out.println("JDBC URL           : " + config.systemTenantConnection.toJdbcUrl());
@@ -143,7 +144,7 @@ public class Main {
             if (config.rsyslogHost != null && !config.rsyslogHost.isEmpty()) {
                 RsyslogSender sender = new RsyslogSender(
                         conn, config.rsyslogHost, config.rsyslogPort,
-                        config.rsyslogBatchSize, lvl);
+                        config.rsyslogBatchSize, config.rsyslogFacility, lvl);
                 int[] sent = sender.send();
                 rsyslogLogin  = sent[0];
                 rsyslogLogoff = sent[1];
@@ -154,7 +155,7 @@ public class Main {
 
             long totalMs = System.currentTimeMillis() - totalStart;
             System.out.printf(
-                "[Main] Done. v20260422-1 Total time: %d ms" +
+                "[Main] Done. v20260423-2 Total time: %d ms" +
                 " | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d" +
                 " | ddlDcl: %d | cleanedDdlDcl: %d | cleanedSessions: %d" +
                 " | rsyslogLogin: %d | rsyslogLogoff: %d | rsyslogDdl: %d%n",
