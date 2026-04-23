@@ -22,8 +22,9 @@
     - 15.4 [Динамические объекты ddl_dcl_audit_targets](#154-динамические-объекты-ddl_dcl_audit_targets)
     - 15.5 [Debug-режим](#155-debug-режим)
 16. [Управление размером таблиц](#управление-размером-таблиц)
-17. [Уровни логирования](#уровни-логирования)
-18. [Поток данных end-to-end](#поток-данных-end-to-end)
+17. [Пересылка в rsyslog](#пересылка-в-rsyslog)
+18. [Уровни логирования](#уровни-логирования)
+19. [Поток данных end-to-end](#поток-данных-end-to-end)
 
 ---
 
@@ -31,6 +32,7 @@
 
 OBAuditor читает логи OceanBase (SERVER и PROXY), извлекает события логина/логоффа,
 собирает DDL/DCL операции из `GV$OB_SQL_AUDIT` и записывает всё в базу `admintools`.
+В конце каждого прогона новые события пересылаются в rsyslog по UDP.
 
 **Стек:** Java 21 (Temurin), OceanBase JDBC, стандартный javax.xml (нет внешних зависимостей кроме драйвера).
 
@@ -49,14 +51,14 @@ OBAuditor читает логи OceanBase (SERVER и PROXY), извлекает 
 src/
 ├── Main.java
 ├── model/
-│   ├── AppConfig.java               # logLevel, ignoredUsers, ddlDclAuditMode, cleanup settings
+│   ├── AppConfig.java               # logLevel, ignoredUsers, ddlDclAuditMode, cleanup, rsyslog settings
 │   ├── AppConfigReader.java
 │   ├── ConnectionConfig.java        # ob_query_timeout=30s
 │   ├── LoginEvent.java
 │   ├── LogFileRecord.java
 │   └── PasswordEnricher.java
 ├── db/
-│   ├── DbInitializer.java           # Создаёт все таблицы
+│   ├── DbInitializer.java           # Создаёт все таблицы включая rsyslog_cursor
 │   ├── LogFileDao.java
 │   ├── SessionDao.java              # insertLogin, updateLogoff, updateLogoffDirect
 │   ├── DdlDclAuditDao.java          # Курсор request_time + динамические targets
@@ -66,7 +68,8 @@ src/
     ├── LogLineHandler.java
     ├── LogLine.java
     ├── ObServerLineParser.java
-    └── ObProxyLineParser.java
+    ├── ObProxyLineParser.java
+    └── RsyslogSender.java           # UDP-пересылка login/logoff/ddl событий
 ```
 
 ---
@@ -84,6 +87,9 @@ src/
 | `Cleanup/CleanupMinute` | `-1` | Минута часа для очистки (-1=выкл) |
 | `Cleanup/MaxDdlDclAuditRows` | `500000` | Макс. строк в ddl_dcl_audit_log |
 | `Cleanup/MaxSessionsRows` | `500000` | Макс. строк в sessions |
+| `Rsyslog/Host` | `` | Хост rsyslog (пусто = отключено) |
+| `Rsyslog/Port` | `514` | UDP-порт rsyslog |
+| `Rsyslog/BatchSize` | `500` | Записей за один батч |
 | `ObProxyLogPaths/Path` | — | Пути до логов OBProxy |
 | `ObServerLogPaths/Path` | — | Пути до логов OBServer |
 | `SystemTenantConnection` | — | Подключение к OB |
@@ -103,6 +109,11 @@ src/
         <MaxDdlDclAuditRows>500000</MaxDdlDclAuditRows>
         <MaxSessionsRows>500000</MaxSessionsRows>
     </Cleanup>
+    <Rsyslog>
+        <Host>192.168.55.200</Host>
+        <Port>514</Port>
+        <BatchSize>500</BatchSize>
+    </Rsyslog>
     <ObProxyLogPaths><Path>/data/obc1/obproxy/log</Path></ObProxyLogPaths>
     <ObServerLogPaths><Path>/data/obc1/observer/log</Path></ObServerLogPaths>
     <SystemTenantConnection>
@@ -125,6 +136,7 @@ src/
 3. `audit_collector_state` — курсор DDL/DCL коллектора (одна строка, id=1)
 4. `ddl_dcl_audit_log` — DDL/DCL события
 5. `ddl_dcl_audit_targets` — объекты для дополнительного DML-аудита
+6. `rsyslog_cursor` — курсор пересылки событий в rsyslog
 
 ### Таблица `sessions`
 
@@ -202,6 +214,18 @@ src/
 | `object_name` | Имя таблицы / процедуры / вьюшки |
 | `description` | Описание |
 | `is_active` | 1=активен, 0=отключён |
+
+### Таблица `rsyslog_cursor`
+
+Курсоры пересылки событий в rsyslog. Три строки: `login`, `logoff`, `ddl`.
+Создаются автоматически через `INSERT IGNORE` при первом запуске `RsyslogSender`.
+
+| Колонка | Описание |
+|---|---|
+| `event_type` | PK: `login` / `logoff` / `ddl` |
+| `last_id` | Последний отправленный `id` из соответствующей таблицы |
+| `last_time` | Для `logoff`: `logoff_time` последней отправленной записи |
+| `updated_at` | Время последней успешной отправки |
 
 ---
 
@@ -358,7 +382,8 @@ WHERE p.source='PROXY' AND p.logoff_time IS NULL
    SELECT ... FROM GV$OB_SQL_AUDIT
    WHERE is_inner_sql=0
      AND request_time > last_rt AND request_time <= new_rt
-     AND <хардкод фильтр + динамические targets>
+     AND <глобальные исключения>
+     AND (<хардкод фильтр> OR <динамические targets>)
 5. UPDATE audit_collector_state SET last_request_time=new_rt, updated_at=NOW(6)
 ```
 
@@ -368,6 +393,18 @@ WHERE p.source='PROXY' AND p.logoff_time IS NULL
 ### 15.3 Хардкод фильтрации DDL/DCL событий
 
 Жёстко прописан в коде — не может быть изменён через конфиг или таблицу targets.
+
+**Глобальные исключения** (верхний уровень WHERE, не могут быть обойдены dynamic targets):
+
+```sql
+-- OceanBase JDBC добавляет /* comment */ перед каждым запросом, поэтому
+-- в GV$OB_SQL_AUDIT query_sql начинается не с ключевого слова — нужен ведущий '%'.
+AND query_sql NOT LIKE '%INSERT IGNORE INTO admintools.ddl_dcl_audit_log%'
+AND query_sql NOT LIKE '%UPDATE sessions SET logoff_time%'
+AND query_sql NOT LIKE '%UPDATE sessions p JOIN sessions s%'
+```
+
+**Фильтр включения** (внутри AND (...)):
 
 ```sql
 -- DDL по stmt_type
@@ -384,21 +421,15 @@ stmt_type IN (
 
 -- User management через LIKE (нет отдельного stmt_type)
 OR (
-    query_sql NOT LIKE 'INSERT IGNORE INTO admintools.ddl_dcl_audit_log%'
-    AND (
-        query_sql LIKE '%CREATE USER%'
-        OR query_sql LIKE '%ALTER USER%'
-        OR query_sql LIKE '%lock_user(%'
-        OR query_sql LIKE '%unlock_user(%'
-    )
+    query_sql LIKE '%CREATE USER%'
+    OR query_sql LIKE '%ALTER USER%'
+    OR query_sql LIKE '%lock_user(%'
+    OR query_sql LIKE '%unlock_user(%'
 )
 
 -- DELETE/UPDATE таблиц аудита (требование безопасников)
--- Исключены наши собственные служебные UPDATE (закрытие логоффов, reconciliation)
 OR (
     stmt_type IN ('DELETE', 'UPDATE')
-    AND query_sql NOT LIKE 'UPDATE sessions SET logoff_time%'
-    AND query_sql NOT LIKE 'UPDATE sessions p JOIN sessions s%'
     AND (
         query_sql LIKE '%admintools.sessions%'
         OR query_sql LIKE '%admintools.ddl_dcl_audit_log%'
@@ -410,6 +441,12 @@ OR (
 
 `stmt_type NOT IN ('VARIABLE_SET')` — исключает мусор.
 `query_sql` очищается от ведущего `/* ... */` через `REGEXP_REPLACE`.
+
+> **Важно:** глобальные исключения вынесены на уровень выше OR-блока намеренно.
+> Dynamic targets матчат имена объектов внутри текста нашего же INSERT IGNORE —
+> query_sql коллектора содержит все LIKE-условия в своём WHERE, включая названия
+> аудируемых таблиц. Если exclusion-паттерны находятся внутри OR, dynamic target
+> обходит их через свою ветку OR.
 
 ### 15.4 Динамические объекты `ddl_dcl_audit_targets`
 
@@ -457,16 +494,54 @@ DELETE FROM table WHERE id < boundary
 
 ---
 
+## Пересылка в rsyslog
+
+**Класс:** `RsyslogSender`. Вызывается из `Main` в конце каждого прогона (после cleanup),
+если `config.rsyslogHost` не пустой.
+
+**Протокол:** UDP, RFC 3164. `<134>` = facility local0, severity info.
+Один `DatagramSocket` на весь вызов `send()`.
+
+**Три типа событий с независимыми курсорами:**
+
+| Тип | Источник | Курсор |
+|---|---|---|
+| `login` | `sessions` (все строки) | `last_id` |
+| `logoff` | `sessions` (где `logoff_time IS NOT NULL`) | `(last_time, last_id)` |
+| `ddl` | `ddl_dcl_audit_log` | `last_id` |
+
+**Курсор logoff — пара `(logoff_time, id)`** вместо просто `id`. Причина: `logoff_time`
+обновляется у существующей строки. Сессия с `id=50` открылась давно, но закрылась
+сегодня — курсор только по `id` пропустил бы её если уже прошёл мимо 50.
+Курсор по `(logoff_time ASC, id ASC)` гарантирует корректную обработку.
+
+**Батчинг:** все новые записи отправляются за один цикл запуска через несколько
+батчей подряд. Размер батча задаётся `BatchSize` в конфиге.
+
+**Поведение при ошибке:** пишем в stderr, курсор не двигается. Данные остаются
+в таблицах и будут отправлены при следующем успешном прогоне.
+
+**Формат сообщений:**
+```
+LOGIN  result=OK|FAIL source=SERVER|PROXY user=... tenant=... client_ip=... session_id=... client_type=... time=...
+LOGOFF source=... user=... tenant=... client_ip=... session_id=... login_time=... logoff_time=...
+DDL    user=... tenant=... db=... stmt=... ret=... sql=... time=...
+```
+
+SQL в DDL-событиях обрезается до 256 символов.
+
+---
+
 ## Уровни логирования
 
 | Уровень | Что выводится |
 |---|---|
 | `ERROR` | Ошибки stderr + `[Main] Done.` |
-| `INFO` | + заголовок, итог по каждому изменившемуся файлу, DDL/DCL события, очистка |
-| `DEBUG` | + детали файлов, каждый LOGOFF, полный SQL к GV$OB_SQL_AUDIT с параметрами |
+| `INFO` | + заголовок, итог по каждому изменившемуся файлу, DDL/DCL события, очистка, rsyslog |
+| `DEBUG` | + детали файлов, каждый LOGOFF, полный SQL к GV$OB_SQL_AUDIT, каждый UDP-пакет |
 
 ```
-[Main] Done. v20260415-2 Total time: 943 ms | lines: 37490 | inserted: 3 | logoff: 3 | logoffMiss: 0 | ddlDcl: 1 | cleanedDdlDcl: 0 | cleanedSessions: 0
+[Main] Done. v20260422-1 Total time: 943 ms | lines: 37490 | inserted: 3 | logoff: 3 | logoffMiss: 0 | ddlDcl: 1 | cleanedDdlDcl: 0 | cleanedSessions: 0 | rsyslogLogin: 5 | rsyslogLogoff: 4 | rsyslogDdl: 1
 ```
 
 ---
@@ -482,7 +557,7 @@ Main.main()
     ├─ DbInitializer.initialize()
     │      └─ CREATE TABLE sessions, logfiles,
     │                      audit_collector_state, ddl_dcl_audit_log,
-    │                      ddl_dcl_audit_targets
+    │                      ddl_dcl_audit_targets, rsyslog_cursor
     │
     ├─ LogFileProcessor(conn, config)  [autoCommit=true]
     │      ├─ processServerDirs() / processProxyDirs()
@@ -503,12 +578,21 @@ Main.main()
     │      └─ INSERT IGNORE INTO ddl_dcl_audit_log
     │           SELECT ... FROM GV$OB_SQL_AUDIT
     │           WHERE request_time > last_rt AND request_time <= new_rt
-    │             AND <хардкод DDL/DCL + DELETE/UPDATE sessions/audit_log>
-    │             OR  <динамические targets>
+    │             AND query_sql NOT LIKE '%INSERT IGNORE INTO admintools.ddl_dcl_audit_log%'
+    │             AND query_sql NOT LIKE '%UPDATE sessions SET logoff_time%'
+    │             AND query_sql NOT LIKE '%UPDATE sessions p JOIN sessions s%'
+    │             AND (<хардкод DDL/DCL> OR <динамические targets>)
     │           UPDATE audit_collector_state SET last_request_time=new_rt
     │
-    └─ CleanupDao  (если текущая минута == cleanupMinute)
-           COUNT(*) → OFFSET → boundary → DELETE WHERE id < boundary
+    ├─ CleanupDao  (если текущая минута == cleanupMinute)
+    │      COUNT(*) → OFFSET → boundary → DELETE WHERE id < boundary
+    │
+    └─ RsyslogSender.send()  (если rsyslogHost не пустой)
+           login  → SELECT FROM sessions WHERE id > last_id      → UDP → update cursor
+           logoff → SELECT FROM sessions WHERE logoff_time IS NOT NULL
+                    AND (logoff_time > last_time OR (logoff_time = last_time AND id > last_id))
+                                                                  → UDP → update cursor
+           ddl    → SELECT FROM ddl_dcl_audit_log WHERE id > last_id → UDP → update cursor
 
-[Main] Done. vYYYYMMDD-N | lines | inserted | logoff | logoffMiss | ddlDcl | cleaned*
+[Main] Done. vYYYYMMDD-N | lines | inserted | logoff | logoffMiss | ddlDcl | cleaned* | rsyslogLogin | rsyslogLogoff | rsyslogDdl
 ```

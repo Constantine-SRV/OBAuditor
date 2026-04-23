@@ -4,6 +4,7 @@ import db.DbInitializer;
 import db.SessionDao;
 import log.LogFileProcessor;
 import log.ObServerLineParser;
+import log.RsyslogSender;
 import model.AppConfig;
 import model.AppConfigReader;
 import model.PasswordEnricher;
@@ -69,6 +70,9 @@ public class Main {
             System.out.println("MaxSessionsRows    : " + config.maxSessionsRows);
             System.out.println("OBProxy log paths  : " + config.obProxyLogPaths);
             System.out.println("OBServer log paths : " + config.obServerLogPaths);
+            System.out.println("RsyslogHost        : " + config.rsyslogHost);
+            System.out.println("RsyslogPort        : " + config.rsyslogPort);
+            System.out.println("RsyslogBatchSize   : " + config.rsyslogBatchSize);
             System.out.println("DB connection      : " + config.systemTenantConnection);
             System.out.println("JDBC URL           : " + config.systemTenantConnection.toJdbcUrl());
             System.out.println("----------------------------\n");
@@ -112,10 +116,8 @@ public class Main {
                 boolean doCollect = false;
 
                 if (config.ddlDclAuditMode == 1) {
-                    // Основной коллектор — всегда собираем
                     doCollect = true;
                 } else if (config.ddlDclAuditMode == 2) {
-                    // Резервный — только если основной не работает более 2 минут
                     doCollect = auditDao.shouldCollectFallback();
                 }
 
@@ -136,12 +138,26 @@ public class Main {
                 }
             }
 
+            // 6e. Пересылка событий в rsyslog
+            int rsyslogLogin = 0, rsyslogLogoff = 0, rsyslogDdl = 0;
+            if (config.rsyslogHost != null && !config.rsyslogHost.isEmpty()) {
+                RsyslogSender sender = new RsyslogSender(
+                        conn, config.rsyslogHost, config.rsyslogPort,
+                        config.rsyslogBatchSize, lvl);
+                int[] sent = sender.send();
+                rsyslogLogin  = sent[0];
+                rsyslogLogoff = sent[1];
+                rsyslogDdl    = sent[2];
+            }
+
             conn.close();
 
             long totalMs = System.currentTimeMillis() - totalStart;
             System.out.printf(
-                "[Main] Done. v20260421-1 Total time: %d ms | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d" +
-                " | ddlDcl: %d | cleanedDdlDcl: %d | cleanedSessions: %d%n",
+                "[Main] Done. v20260422-1 Total time: %d ms" +
+                " | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d" +
+                " | ddlDcl: %d | cleanedDdlDcl: %d | cleanedSessions: %d" +
+                " | rsyslogLogin: %d | rsyslogLogoff: %d | rsyslogDdl: %d%n",
                 totalMs,
                 processor.getTotalLines(),
                 processor.getTotalInserted(),
@@ -149,7 +165,10 @@ public class Main {
                 processor.getTotalLogoffMiss(),
                 ddlDclInserted,
                 cleanedDdlDcl,
-                cleanedSessions);
+                cleanedSessions,
+                rsyslogLogin,
+                rsyslogLogoff,
+                rsyslogDdl);
 
         } catch (Exception e) {
             System.err.println("[Main] Processing failed: " + e.getMessage());

@@ -38,6 +38,7 @@ public class DbInitializer {
             ensureAuditCollectorStateRow(conn);
             ensureTable(conn, createDdlDclAuditLogTableSql());
             ensureTable(conn, createDdlDclAuditTargetsTableSql());
+            ensureTable(conn, createRsyslogCursorTableSql());
         }
 
         debug("[DbInitializer] Initialization complete.");
@@ -195,19 +196,6 @@ public class DbInitializer {
         return new TableDef("ddl_dcl_audit_log", ddl);
     }
 
-    /**
-     * ddl_dcl_audit_targets — объекты для дополнительного DML-аудита.
-     *
-     * Каждая строка задаёт объект (таблицу, процедуру, вьюшку) чьи упоминания
-     * в query_sql должны попадать в аудит дополнительно к стандартным DDL/DCL.
-     *
-     * Логика поиска (OR комбинация):
-     *   - Если db_name заполнен: query_sql LIKE '%db_name.object_name%'
-     *     OR (db_name = db_name AND query_sql LIKE '%object_name%')
-     *   - Если db_name NULL:     query_sql LIKE '%object_name%'
-     *   - Если tenant_id заполнен: применяется только для этого тенанта
-     *   - Если tenant_id NULL:     применяется для всех тенантов
-     */
     private TableDef createDdlDclAuditTargetsTableSql() {
         String ddl =
                 "CREATE TABLE `ddl_dcl_audit_targets` (" +
@@ -223,6 +211,30 @@ public class DbInitializer {
                         "  KEY `idx_active` (`is_active`)" +
                         ") COMMENT = 'Объекты для дополнительного DML-аудита через GV$OB_SQL_AUDIT'";
         return new TableDef("ddl_dcl_audit_targets", ddl);
+    }
+
+    /**
+     * rsyslog_cursor — курсор последней успешной отправки событий в rsyslog.
+     *
+     * Три строки (event_type = 'login' / 'logoff' / 'ddl'), создаются автоматически
+     * при первом запуске RsyslogSender через INSERT IGNORE.
+     *
+     * last_id   — последний отправленный id из sessions / ddl_dcl_audit_log.
+     * last_time — для logoff: logoff_time последней отправленной записи.
+     *             Используется как часть составного курсора (logoff_time, id),
+     *             чтобы корректно обрабатывать долгоживущие сессии у которых
+     *             id меньше уже отправленных но logoff наступил позже.
+     */
+    private TableDef createRsyslogCursorTableSql() {
+        String ddl =
+                "CREATE TABLE `rsyslog_cursor` (" +
+                        "  `event_type` VARCHAR(32)     NOT NULL COMMENT 'login / logoff / ddl'," +
+                        "  `last_id`    BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'последний отправленный id'," +
+                        "  `last_time`  VARCHAR(32)         NULL COMMENT 'для logoff: последний отправленный logoff_time'," +
+                        "  `updated_at` DATETIME(6)         NULL COMMENT 'время последней успешной отправки'," +
+                        "  PRIMARY KEY (`event_type`)" +
+                        ") COMMENT = 'Курсор пересылки событий аудита в rsyslog'";
+        return new TableDef("rsyslog_cursor", ddl);
     }
 
     // ─────────────────────────────────────────────────────────────────

@@ -58,6 +58,15 @@ public class AppConfigReader {
             cfg.maxSessionsRows    = parseLong(getText(cleanupEl, "MaxSessionsRows"), 500000L);
         }
 
+        // Rsyslog settings
+        Element rsyslogEl = getFirstElement(doc, "Rsyslog");
+        if (rsyslogEl != null) {
+            String rsHost = getText(rsyslogEl, "Host");
+            if (rsHost != null && !rsHost.isEmpty()) cfg.rsyslogHost = rsHost;
+            cfg.rsyslogPort      = parseInt(getText(rsyslogEl, "Port"),      514);
+            cfg.rsyslogBatchSize = parseInt(getText(rsyslogEl, "BatchSize"), 500);
+        }
+
         return cfg;
     }
 

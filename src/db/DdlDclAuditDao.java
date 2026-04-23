@@ -208,6 +208,15 @@ public class DdlDclAuditDao {
                         "   AND request_time > ?" +
                         "   AND request_time <= ?" +
                         "   AND stmt_type NOT IN ('VARIABLE_SET')" +
+                        // ── Глобальные исключения — наши собственные служебные запросы. ──
+                        // Вынесены на верхний уровень WHERE (вне OR-блока), иначе dynamic
+                        // targets могут их поймать: текст нашего INSERT IGNORE содержит имена
+                        // всех target-объектов в своих же LIKE-условиях.
+                        // Ведущий '%' обязателен: JDBC добавляет /* comment */ перед запросом,
+                        // поэтому query_sql в GV$OB_SQL_AUDIT начинается не с ключевого слова.
+                        "   AND query_sql NOT LIKE '%INSERT IGNORE INTO admintools.ddl_dcl_audit_log%'" +
+                        "   AND query_sql NOT LIKE '%UPDATE sessions SET logoff_time%'" +
+                        "   AND query_sql NOT LIKE '%UPDATE sessions p JOIN sessions s%'" +
                         "   AND ("
         );
 
@@ -226,19 +235,14 @@ public class DdlDclAuditDao {
                         "     )" +
                         // ── Хардкод: user management через LIKE (не имеет stmt_type) ──
                         "     OR (" +
-                        "       query_sql NOT LIKE 'INSERT IGNORE INTO admintools.ddl_dcl_audit_log%'" +
-                        "       AND (" +
                         "         query_sql LIKE '%CREATE USER%'" +
                         "         OR query_sql LIKE '%ALTER USER%'" +
                         "         OR query_sql LIKE '%lock_user(%'" +
                         "         OR query_sql LIKE '%unlock_user(%'" +
-                        "       )" +
                         "     )" +
-                        // ── Хардкод: DELETE/UPDATE таблиц аудита (требование безопасников) ──
+                        // ── Хардкод: DELETE/UPDATE таблиц аудита  ──
                         "     OR (" +
                         "       stmt_type IN ('DELETE', 'UPDATE')" +
-                        "       AND query_sql NOT LIKE 'UPDATE sessions SET logoff_time%'" +
-                        "       AND query_sql NOT LIKE 'UPDATE sessions p JOIN sessions s%'" +
                         "       AND (" +
                         "         query_sql LIKE '%admintools.sessions%'" +
                         "         OR query_sql LIKE '%admintools.ddl_dcl_audit_log%'" +

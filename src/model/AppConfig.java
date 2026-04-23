@@ -74,6 +74,24 @@ public class AppConfig {
      */
     public List<String> ignoredUsers = Arrays.asList("ocp_monitor", "proxy_ro", "proxyro");
 
+    // ── rsyslog ───────────────────────────────────────────────────────
+
+    /**
+     * Хост rsyslog для пересылки событий по UDP.
+     * Пустая строка — пересылка отключена.
+     */
+    public String rsyslogHost = "";
+
+    /** UDP-порт rsyslog. По умолчанию 514. */
+    public int rsyslogPort = 514;
+
+    /**
+     * Максимальное количество записей одного типа (login / logoff / ddl)
+     * за один батч. Все новые записи будут отправлены за один цикл запуска
+     * через несколько батчей подряд. По умолчанию 500.
+     */
+    public int rsyslogBatchSize = 500;
+
     @Override
     public String toString() {
         return "AppConfig{\n" +
@@ -86,6 +104,9 @@ public class AppConfig {
                 "  cleanupMinute=" + cleanupMinute + "\n" +
                 "  maxDdlDclAuditRows=" + maxDdlDclAuditRows + "\n" +
                 "  maxSessionsRows=" + maxSessionsRows + "\n" +
+                "  rsyslogHost=" + rsyslogHost + "\n" +
+                "  rsyslogPort=" + rsyslogPort + "\n" +
+                "  rsyslogBatchSize=" + rsyslogBatchSize + "\n" +
                 "  systemTenantConnection=" + systemTenantConnection + "\n" +
                 "}";
     }
