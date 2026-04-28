@@ -49,7 +49,6 @@ public class CleanupDao {
             return 0;
         }
 
-        // Шаг 1: считаем реальное количество строк
         long count;
         try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM " + tableName);
              ResultSet rs = ps.executeQuery()) {
@@ -62,9 +61,10 @@ public class CleanupDao {
             return 0;
         }
 
-        // Шаг 2: находим id первой строки которую нужно оставить
-        // (пропускаем count-maxRows самых старых строк)
-        long offset = count - maxRows;
+        // Удаляем до 90% от maxRows чтобы следующая очистка не требовалась сразу же
+        long targetRows = (long) (maxRows * 0.9);
+        long offset = count - targetRows;
+
         Long boundary;
         String offsetSql = "SELECT id FROM " + tableName + " ORDER BY id ASC LIMIT 1 OFFSET ?";
         try (PreparedStatement ps = conn.prepareStatement(offsetSql)) {
@@ -78,9 +78,8 @@ public class CleanupDao {
             }
         }
 
-        // Шаг 3: удаляем в собственной транзакции
         debug("[CleanupDao] " + tableName + " — deleting id < " + boundary
-                + " (count=" + count + ", maxRows=" + maxRows + ", offset=" + offset + ")");
+                + " (count=" + count + ", maxRows=" + maxRows + ", target=" + targetRows + ", offset=" + offset + ")");
         int deleted;
         boolean prevAutoCommit = conn.getAutoCommit();
         conn.setAutoCommit(false);
@@ -97,7 +96,8 @@ public class CleanupDao {
             conn.setAutoCommit(prevAutoCommit);
         }
 
-        info(String.format("[CleanupDao] %s — deleted %d old row(s), kept %d", tableName, deleted, maxRows));
+        info(String.format("[CleanupDao] %s — deleted %d old row(s), kept ~%d (target=%d)",
+                tableName, deleted, count - deleted, targetRows));
         return deleted;
     }
 }
