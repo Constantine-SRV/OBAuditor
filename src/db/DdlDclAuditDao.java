@@ -248,6 +248,8 @@ public class DdlDclAuditDao {
                         "         OR query_sql LIKE '%admintools.ddl_dcl_audit_log%'" +
                         "         OR (db_name = 'admintools' AND query_sql LIKE '%sessions%')" +
                         "         OR (db_name = 'admintools' AND query_sql LIKE '%ddl_dcl_audit_log%')" +
+                        "         OR query_sql LIKE '%admintools.ddl_dcl_audit_targets%'" +
+                        "         OR (db_name = 'admintools' AND query_sql LIKE '%ddl_dcl_audit_targets%')" +
                         "       )" +
                         "     )"
         );
