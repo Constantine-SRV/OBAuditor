@@ -155,7 +155,7 @@ public class Main {
 
             long totalMs = System.currentTimeMillis() - totalStart;
             System.out.printf(
-                "[Main] Done. v20260423-2 Total time: %d ms" +
+                "[Main] Done. v20260428-1 Total time: %d ms" +
                 " | lines: %d | inserted: %d | logoff: %d | logoffMiss: %d" +
                 " | ddlDcl: %d | cleanedDdlDcl: %d | cleanedSessions: %d" +
                 " | rsyslogLogin: %d | rsyslogLogoff: %d | rsyslogDdl: %d%n",
